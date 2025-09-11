@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useQuery, useQueryClient } from 'react-query'
-import { Search, Filter, Download, RefreshCw, Cpu, Wifi, WifiOff, Trash2 } from 'lucide-react'
+import { Search, Download, RefreshCw, Cpu, Wifi, WifiOff, Trash2 } from 'lucide-react'
 import axios from 'axios'
 import { Link } from 'react-router-dom'
 import { format } from 'date-fns'

@@ -1,12 +1,13 @@
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, List, Any
 from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 class IngestRequest(BaseModel):
     source: str = Field(description="upload or file path")
-    field_map: Dict[str, str] = Field(default_factory=lambda: {"ip": "ip", "port": "port"})
-    scan_label: Optional[str] = None
+    field_map: dict[str, str] = Field(default_factory=lambda: {"ip": "ip", "port": "port"})
+    scan_label: str | None = None
 
 
 class IngestResponse(BaseModel):
@@ -20,17 +21,17 @@ class ScanResponse(BaseModel):
     source_file: str
     status: str
     started_at: datetime
-    completed_at: Optional[datetime]
+    completed_at: datetime | None
     total_rows: int
     processed_rows: int
-    mapping: Dict[str, Any]
-    stats: Dict[str, Any]
-    error_message: Optional[str]
+    mapping: dict[str, Any]
+    stats: dict[str, Any]
+    error_message: str | None
 
 
 class ProbeRequest(BaseModel):
-    host_ids: Optional[List[int]] = None
-    filter: Optional[Dict[str, Any]] = None
+    host_ids: list[int] | None = None
+    filter: dict[str, Any] | None = None
 
 
 class HostResponse(BaseModel):
@@ -39,31 +40,31 @@ class HostResponse(BaseModel):
     port: int
     status: str
     last_seen: datetime
-    first_seen: Optional[datetime] = None
-    latency_ms: Optional[float]
-    api_version: Optional[str]
-    os: Optional[str] = None
-    arch: Optional[str] = None
-    ram_gb: Optional[float] = None
-    gpu: Optional[str]
-    gpu_vram_mb: Optional[int]
-    geo_country: Optional[str] = None
-    geo_city: Optional[str] = None
-    models: List[Any]
-    last_probe: Optional[Dict[str, Any]] = None
+    first_seen: datetime | None = None
+    latency_ms: float | None
+    api_version: str | None
+    os: str | None = None
+    arch: str | None = None
+    ram_gb: float | None = None
+    gpu: str | None
+    gpu_vram_mb: int | None
+    geo_country: str | None = None
+    geo_city: str | None = None
+    models: list[Any]
+    last_probe: dict[str, Any] | None = None
 
 
 class ModelResponse(BaseModel):
     id: int
     name: str
-    family: Optional[str]
-    parameters: Optional[str]
+    family: str | None
+    parameters: str | None
     host_count: int
 
 
 class ExportRequest(BaseModel):
     format: str = "csv"
-    filters: Optional[Dict[str, Any]] = None
+    filters: dict[str, Any] | None = None
 
 
 class HealthResponse(BaseModel):
@@ -72,7 +73,7 @@ class HealthResponse(BaseModel):
 
 
 class PaginatedHostResponse(BaseModel):
-    items: List[HostResponse]
+    items: list[HostResponse]
     total: int
     page: int
     size: int
@@ -88,11 +89,11 @@ class PromptRequest(BaseModel):
 
 class PromptResponse(BaseModel):
     success: bool
-    response: Optional[str] = None
-    error: Optional[str] = None
-    model: Optional[str] = None
-    total_duration: Optional[int] = None
-    load_duration: Optional[int] = None
-    prompt_eval_duration: Optional[int] = None
-    eval_duration: Optional[int] = None
-    eval_count: Optional[int] = None
+    response: str | None = None
+    error: str | None = None
+    model: str | None = None
+    total_duration: int | None = None
+    load_duration: int | None = None
+    prompt_eval_duration: int | None = None
+    eval_duration: int | None = None
+    eval_count: int | None = None

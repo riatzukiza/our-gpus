@@ -1,5 +1,5 @@
+
 from pydantic_settings import BaseSettings
-from typing import List
 
 
 class Settings(BaseSettings):
@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
 
-    def get_allowed_origins(self) -> List[str]:
+    def get_allowed_origins(self) -> list[str]:
         return [origin.strip() for origin in self.allowed_origins.split(",")]
 
 
