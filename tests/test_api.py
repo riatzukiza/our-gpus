@@ -1,6 +1,7 @@
-from unittest.mock import patch
-from app.db import Host
 from datetime import datetime
+from unittest.mock import patch
+
+from app.db import Host
 
 
 def test_health_check(client):
@@ -63,24 +64,26 @@ def test_get_host_detail(client, session):
     assert data["ip"] == "1.2.3.4"
 
 
-def test_get_host_not_found(client, session):
+def test_get_host_not_found(client, session):  # noqa: ARG001
     response = client.get("/api/hosts/999")
     assert response.status_code == 404
 
 
 def test_trigger_probe(client):
-    with patch("worker.tasks.probe_host") as mock_task:
-        with patch("app.main.get_session") as mock_session:
-            mock_hosts = [Host(id=1, ip="1.2.3.4", port=11434)]
+    with (
+        patch("worker.tasks.probe_host") as mock_task,
+        patch("app.main.get_session") as mock_session,
+    ):
+        mock_hosts = [Host(id=1, ip="1.2.3.4", port=11434)]
 
-            mock_session.return_value.exec.return_value.all.return_value = mock_hosts
-            mock_task.delay.return_value.id = "task-456"
+        mock_session.return_value.exec.return_value.all.return_value = mock_hosts
+        mock_task.delay.return_value.id = "task-456"
 
-            response = client.post("/api/probe", json={"host_ids": [1]})
+        response = client.post("/api/probe", json={"host_ids": [1]})
 
-            assert response.status_code == 200
-            data = response.json()
-            assert "Queued 1 probe tasks" in data["message"]
+        assert response.status_code == 200
+        data = response.json()
+        assert "Queued 1 probe tasks" in data["message"]
 
 
 def test_export_csv(client):

@@ -66,7 +66,6 @@ class ProbeService:
                         # Infer GPU availability from model sizes
                         # Large models (>10GB) typically require GPU
                         if not gpu_detected and "models" in tags_data:
-                            has_large_models = False
                             for model in tags_data.get("models", []):
                                 model_size = model.get("size", 0)
                                 # Models > 10GB usually indicate GPU availability

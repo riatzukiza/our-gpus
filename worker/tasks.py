@@ -18,12 +18,12 @@ logger = logging.getLogger(__name__)
 engine = create_engine(
     settings.database_url,
     echo=False,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {}
+    connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
 )
 
 
 @celery_app.task(bind=True, name="worker.tasks.process_ingest")
-def process_ingest(self, scan_id: int, file_data: bytes = None):
+def process_ingest(self, scan_id: int, file_data: bytes = None):  # noqa: ARG001
     """Process data ingestion job"""
     with Session(engine) as session:
         scan = session.get(Scan, scan_id)
@@ -40,7 +40,7 @@ def process_ingest(self, scan_id: int, file_data: bytes = None):
 
             # Read file data if not provided
             if not file_data and scan.source_file:
-                with open(scan.source_file, 'rb') as f:
+                with open(scan.source_file, "rb") as f:
                     file_data = f.read()
 
             if not file_data:
@@ -68,8 +68,7 @@ def process_ingest(self, scan_id: int, file_data: bytes = None):
                     # Update progress
                     scan.processed_rows = i + 1
                     current_task.update_state(
-                        state="PROGRESS",
-                        meta={"current": i + 1, "total": scan.total_rows}
+                        state="PROGRESS", meta={"current": i + 1, "total": scan.total_rows}
                     )
 
                     if i % 1000 == 0:
@@ -85,18 +84,14 @@ def process_ingest(self, scan_id: int, file_data: bytes = None):
             scan.status = "completed"
             scan.completed_at = datetime.utcnow()
             scan.processed_rows = total_success + total_failed
-            scan.stats = {
-                **scan.stats,
-                "success": total_success,
-                "failed": total_failed
-            }
+            scan.stats = {**scan.stats, "success": total_success, "failed": total_failed}
             session.commit()
 
             return {
                 "status": "completed",
                 "processed": total_success + total_failed,
                 "success": total_success,
-                "failed": total_failed
+                "failed": total_failed,
             }
 
         except Exception as e:
@@ -108,7 +103,7 @@ def process_ingest(self, scan_id: int, file_data: bytes = None):
 
 
 @celery_app.task(bind=True, name="worker.tasks.probe_host")
-def probe_host(self, host_id: int):
+def probe_host(self, host_id: int):  # noqa: ARG001
     """Probe a single Ollama host"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -151,23 +146,21 @@ def probe_host(self, host_id: int):
                             model = Model(
                                 name=model_data["name"],
                                 family=model_data["family"],
-                                parameters=model_data["parameters"]
+                                parameters=model_data["parameters"],
                             )
                             session.add(model)
                             session.flush()
 
                         # Create host-model association
-                        host_model = HostModel(
-                            host_id=host.id,
-                            model_id=model.id,
-                            loaded=False
-                        )
+                        host_model = HostModel(host_id=host.id, model_id=model.id, loaded=False)
 
                         # Check if model is loaded (from ps endpoint)
                         for loaded_model in ps_data.get("models", []):
                             if loaded_model.get("name") == model_data["name"]:
                                 host_model.loaded = True
-                                host_model.vram_usage_mb = loaded_model.get("size_vram", 0) // (1024 * 1024)
+                                host_model.vram_usage_mb = loaded_model.get("size_vram", 0) // (
+                                    1024 * 1024
+                                )
                                 break
 
                         session.add(host_model)
@@ -180,7 +173,7 @@ def probe_host(self, host_id: int):
             return {
                 "status": probe.status,
                 "duration_ms": probe.duration_ms,
-                "host": f"{host.ip}:{host.port}"
+                "host": f"{host.ip}:{host.port}",
             }
 
     finally:
@@ -188,7 +181,7 @@ def probe_host(self, host_id: int):
 
 
 @celery_app.task(bind=True, name="worker.tasks.batch_probe")
-def batch_probe(self, host_ids: list):
+def batch_probe(self, host_ids: list):  # noqa: ARG001
     """Probe multiple hosts"""
     results = []
     for host_id in host_ids:

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlmodel import Session, SQLModel, create_engine
 
-from app.db import Host
+from app.db import Host, Probe
 from app.ingest import IngestService
 from app.probe import ProbeService
 
@@ -16,12 +16,14 @@ def generate_test_data(num_records):
     """Generate synthetic JSON data for testing"""
     records = []
     for i in range(num_records):
-        records.append({
-            "ip": f"10.0.{i // 256}.{i % 256}",
-            "port": 11434,
-            "country": "US" if i % 2 == 0 else "UK",
-            "city": f"City{i % 100}"
-        })
+        records.append(
+            {
+                "ip": f"10.0.{i // 256}.{i % 256}",
+                "port": 11434,
+                "country": "US" if i % 2 == 0 else "UK",
+                "city": f"City{i % 100}",
+            }
+        )
     return "\n".join(json.dumps(r) for r in records).encode()
 
 
@@ -41,26 +43,22 @@ def test_ingest_performance(perf_session):
     data = generate_test_data(100000)
 
     # Create temp file
-    with tempfile.NamedTemporaryFile(mode='wb', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="wb", delete=False) as f:
         f.write(data)
-        temp_file = f.name
+        _ = f.name  # noqa: F841
 
-    mapping = {
-        "ip": "ip",
-        "port": "port",
-        "geo_country": "country",
-        "geo_city": "city"
-    }
+    mapping = {"ip": "ip", "port": "port", "geo_country": "country", "geo_city": "city"}
 
     # Track memory usage (simplified - in production use memory_profiler)
     import tracemalloc
+
     tracemalloc.start()
 
     start_time = time.time()
     total_processed = 0
     batch = []
 
-    for i, record in enumerate(service.parse_stream(data, mapping)):
+    for _i, record in enumerate(service.parse_stream(data, mapping)):
         batch.append(record)
 
         if len(batch) >= 1000:
@@ -92,17 +90,15 @@ async def test_probe_performance():
     service = ProbeService()
 
     # Create mock hosts
-    hosts = [
-        Host(id=i, ip=f"10.0.0.{i}", port=11434, status="unknown")
-        for i in range(100)
-    ]
+    hosts = [Host(id=i, ip=f"10.0.0.{i}", port=11434, status="unknown") for i in range(100)]
 
     latencies = []
 
-    with patch('httpx.AsyncClient') as mock_client:
+    with patch("httpx.AsyncClient") as mock_client:
         # Simulate various response times
-        async def mock_get(url):
+        async def mock_get(url):  # noqa: ARG001
             import random
+
             delay = random.uniform(0.1, 0.5)  # 100-500ms response time
             await asyncio.sleep(delay)
 
@@ -117,7 +113,7 @@ async def test_probe_performance():
         # Run probes and measure latency
         for host in hosts[:20]:  # Test subset for speed
             start = time.time()
-            probe = await service.probe_host(host)
+            await service.probe_host(host)  # noqa: F841
             latency = (time.time() - start) * 1000
             latencies.append(latency)
 
@@ -147,11 +143,9 @@ def test_concurrent_probe_limits():
 
     hosts = [Host(id=i, ip=f"10.0.0.{i}", port=11434) for i in range(50)]
 
-    with patch.object(service, 'probe_host', side_effect=mock_probe):
+    with patch.object(service, "probe_host", side_effect=mock_probe):
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(
-            asyncio.gather(*[service.probe_host(h) for h in hosts])
-        )
+        loop.run_until_complete(asyncio.gather(*[service.probe_host(h) for h in hosts]))
 
     # Should not exceed concurrency limit
     assert max_active <= service.concurrency

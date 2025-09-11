@@ -21,12 +21,14 @@ from app.ingest import IngestService
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Ingest JSON/JSONL data into Ollama discovery database')
-    parser.add_argument('file', help='Path to JSON/JSONL file')
-    parser.add_argument('--mapping', type=str, help='JSON string of field mappings')
-    parser.add_argument('--auto-detect', action='store_true', help='Auto-detect field mappings')
-    parser.add_argument('--batch-size', type=int, default=1000, help='Batch size for processing')
-    parser.add_argument('--dry-run', action='store_true', help='Preview without importing')
+    parser = argparse.ArgumentParser(
+        description="Ingest JSON/JSONL data into Ollama discovery database"
+    )
+    parser.add_argument("file", help="Path to JSON/JSONL file")
+    parser.add_argument("--mapping", type=str, help="JSON string of field mappings")
+    parser.add_argument("--auto-detect", action="store_true", help="Auto-detect field mappings")
+    parser.add_argument("--batch-size", type=int, default=1000, help="Batch size for processing")
+    parser.add_argument("--dry-run", action="store_true", help="Preview without importing")
 
     args = parser.parse_args()
 
@@ -39,7 +41,7 @@ def main():
 
     with Session(engine) as session:
         # Read file
-        with open(args.file, 'rb') as f:
+        with open(args.file, "rb") as f:
             file_data = f.read()
 
         service = IngestService(session)
@@ -57,43 +59,43 @@ def main():
             mapping = json.loads(args.mapping)
         elif args.auto_detect:
             # Auto-detect common fields
-            fields = schema['fields'].keys()
-            if 'ip' in fields:
-                mapping['ip'] = 'ip'
-            elif 'host' in fields:
-                mapping['ip'] = 'host'
+            fields = schema["fields"].keys()
+            if "ip" in fields:
+                mapping["ip"] = "ip"
+            elif "host" in fields:
+                mapping["ip"] = "host"
 
-            if 'port' in fields:
-                mapping['port'] = 'port'
+            if "port" in fields:
+                mapping["port"] = "port"
 
-            if 'country' in fields:
-                mapping['geo_country'] = 'country'
-            if 'city' in fields:
-                mapping['geo_city'] = 'city'
+            if "country" in fields:
+                mapping["geo_country"] = "country"
+            if "city" in fields:
+                mapping["geo_city"] = "city"
 
             print(f"Auto-detected mapping: {json.dumps(mapping)}")
         else:
             # Interactive mapping
             print("\nConfigure field mapping:")
-            target_fields = ['ip', 'port', 'geo_country', 'geo_city']
+            target_fields = ["ip", "port", "geo_country", "geo_city"]
 
             for target in target_fields:
                 print(f"\n{target} (required={'ip' in target}):")
                 print("Available source fields:")
-                for i, field in enumerate(schema['fields'].keys(), 1):
+                for i, field in enumerate(schema["fields"].keys(), 1):
                     print(f"  {i}. {field}")
                 print("  0. Skip")
 
                 choice = input("Select field number: ").strip()
-                if choice and choice != '0':
+                if choice and choice != "0":
                     try:
                         idx = int(choice) - 1
-                        source_field = list(schema['fields'].keys())[idx]
+                        source_field = list(schema["fields"].keys())[idx]
                         mapping[target] = source_field
                     except (ValueError, IndexError):
                         print("Invalid selection")
 
-        if 'ip' not in mapping:
+        if "ip" not in mapping:
             print("Error: IP field mapping is required")
             sys.exit(1)
 
@@ -101,10 +103,8 @@ def main():
 
         if args.dry_run:
             print("\nDry run - previewing first 10 records:")
-            count = 0
-            for record in service.parse_stream(file_data, mapping):
+            for count, record in enumerate(service.parse_stream(file_data, mapping), 1):
                 print(f"  {record}")
-                count += 1
                 if count >= 10:
                     break
             print("\nDry run complete. No data was imported.")
@@ -115,7 +115,7 @@ def main():
             source_file=args.file,
             mapping_json=json.dumps(mapping),
             status="processing",
-            started_at=datetime.utcnow()
+            started_at=datetime.utcnow(),
         )
         session.add(scan)
         session.commit()
@@ -148,10 +148,7 @@ def main():
         scan.status = "completed"
         scan.completed_at = datetime.utcnow()
         scan.processed_rows = total_success + total_failed
-        scan.stats = {
-            "success": total_success,
-            "failed": total_failed
-        }
+        scan.stats = {"success": total_success, "failed": total_failed}
         session.commit()
 
         print("\nIngestion complete!")
