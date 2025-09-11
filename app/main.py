@@ -21,7 +21,7 @@ from app.ingest import IngestService
 from app.probe import ProbeService
 
 
-app = FastAPI(title="our gpus API", version="1.0.0")
+app = FastAPI(title="our gpu API", version="1.0.0")
 
 # Metrics
 ingest_counter = Counter("ingest_total", "Total ingests started")
@@ -153,6 +153,14 @@ async def trigger_probe(
             query = query.join(HostModel).join(Model).where(
                 Model.family == request.filter["family"]
             )
+        if "gpu" in request.filter:
+            gpu_filter = request.filter["gpu"]
+            if gpu_filter is True:
+                query = query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
+            elif gpu_filter is False:
+                query = query.where((Host.gpu == None) & ((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb == None)))
+        if "status" in request.filter:
+            query = query.where(Host.status == request.filter["status"])
     else:
         query = query.limit(100)  # Default limit
     
@@ -193,9 +201,9 @@ async def list_hosts(
         base_query = base_query.join(HostModel).join(Model).where(Model.family == family)
     if gpu is not None:
         if gpu:
-            base_query = base_query.where(Host.gpu_vram_mb > 0)
+            base_query = base_query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
         else:
-            base_query = base_query.where((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb == None))
+            base_query = base_query.where((Host.gpu == None) & ((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb == None)))
     if status:
         base_query = base_query.where(Host.status == status)
     
@@ -348,9 +356,9 @@ async def export_data(
         query = query.join(HostModel).join(Model).where(Model.family == family)
     if gpu is not None:
         if gpu:
-            query = query.where(Host.gpu_vram_mb > 0)
+            query = query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
         else:
-            query = query.where((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb == None))
+            query = query.where((Host.gpu == None) & ((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb == None)))
     
     hosts = session.exec(query).all()
     

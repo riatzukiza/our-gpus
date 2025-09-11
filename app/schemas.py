@@ -30,7 +30,7 @@ class ScanResponse(BaseModel):
 
 class ProbeRequest(BaseModel):
     host_ids: Optional[List[int]] = None
-    filter: Optional[Dict[str, str]] = None
+    filter: Optional[Dict[str, Any]] = None
 
 
 class HostResponse(BaseModel):

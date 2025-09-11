@@ -21,7 +21,7 @@ export default function Layout({ children }: LayoutProps) {
                   alt="Hammer and Sickle" 
                   className="w-8 h-8 mr-3"
                 />
-                <h1 className="text-xl font-bold text-gray-900 dark:text-white">our gpus</h1>
+                <h1 className="text-xl font-bold text-gray-900 dark:text-white">our gpu</h1>
               </div>
               <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
                 <Link
