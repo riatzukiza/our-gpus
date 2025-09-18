@@ -48,8 +48,24 @@ class IngestService:
         except UnicodeDecodeError:
             pass
 
+        # Try JSON array first (since JSONL would parse '[' as invalid)
         try:
-            # Try JSONL format
+            content = data.decode("utf-8").strip()
+            if content.startswith("["):
+                parser = ijson.items(io.BytesIO(data), "item")
+                for i, record in enumerate(parser):
+                    if i >= limit:
+                        break
+                    schema["sample_records"].append(record)
+                    for key, value in record.items():
+                        if key not in schema["fields"]:
+                            schema["fields"][key] = type(value).__name__
+                return schema
+        except Exception:
+            pass
+
+        # Try JSONL format
+        try:
             lines = data.decode("utf-8").split("\n")[:limit]
             for line in lines:
                 if line.strip():
@@ -59,18 +75,7 @@ class IngestService:
                         if key not in schema["fields"]:
                             schema["fields"][key] = type(value).__name__
         except Exception:
-            # Try JSON array
-            try:
-                parser = ijson.items(io.BytesIO(data), "item")
-                for i, record in enumerate(parser):
-                    if i >= limit:
-                        break
-                    schema["sample_records"].append(record)
-                    for key, value in record.items():
-                        if key not in schema["fields"]:
-                            schema["fields"][key] = type(value).__name__
-            except Exception:
-                pass
+            pass
 
         return schema
 

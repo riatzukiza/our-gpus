@@ -187,15 +187,15 @@ class ProbeService:
     def _extract_family(self, model_name: str) -> str:
         """Extract model family from name"""
         families = [
-            "llama",
-            "mistral",
+            "codellama",  # Check more specific names first
+            "deepseek",
             "mixtral",
-            "phi",
+            "mistral",
+            "vicuna",
+            "llama",
             "gemma",
             "qwen",
-            "deepseek",
-            "codellama",
-            "vicuna",
+            "phi",
         ]
         name_lower = model_name.lower()
         for family in families:
