@@ -44,6 +44,11 @@ jobs:
       - name: Run tests
         run: |
           pytest tests/ -v --cov=app --cov=worker --cov-report=xml
+          
+      - name: Clean up test database
+        if: always()
+        run: |
+          rm -f ./test_ci.db
       
       - name: Upload coverage
         uses: codecov/codecov-action@v3

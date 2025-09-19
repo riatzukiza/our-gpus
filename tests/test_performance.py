@@ -76,7 +76,7 @@ def test_ingest_performance(perf_session):
 
     # Assertions
     assert total_processed == 100000
-    assert elapsed < 300  # Should process 100k records in under 5 minutes (CI is slower)
+    assert elapsed < 60  # Should process 100k records in under 1 minute
     assert peak / 1024 / 1024 < 500  # Peak memory usage under 500MB
 
     # Verify data in database
@@ -122,7 +122,7 @@ async def test_probe_performance():
     p95_idx = int(len(latencies) * 0.95)
     p95_latency = latencies[p95_idx] if p95_idx < len(latencies) else latencies[-1]
 
-    assert p95_latency < 3000  # p95 should be under 3 seconds (CI is slower)
+    assert p95_latency < 1000  # p95 should be under 1 second
 
 
 @pytest.mark.asyncio
