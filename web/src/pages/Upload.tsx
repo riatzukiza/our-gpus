@@ -55,9 +55,29 @@ export default function Upload() {
         }
 
         // JSON/JSONL parsing
-        const sampleRecords = lines
-          .filter((l) => l.trim())
-          .map((l) => JSON.parse(l));
+        let sampleRecords = [];
+        
+        // Try to parse as complete JSON first (array or object)
+        try {
+          const fullContent = JSON.parse(text.trim());
+          if (Array.isArray(fullContent)) {
+            sampleRecords = fullContent.slice(0, 10);
+          } else if (typeof fullContent === 'object' && fullContent !== null) {
+            sampleRecords = [fullContent];
+          }
+        } catch {
+          // Fall back to JSONL parsing (line by line)
+          sampleRecords = lines
+            .filter((l) => l.trim())
+            .map((l) => {
+              try {
+                return JSON.parse(l);
+              } catch {
+                return null;
+              }
+            })
+            .filter(record => record !== null);
+        }
 
         const fields: Record<string, string> = {};
         sampleRecords.forEach((record) => {
