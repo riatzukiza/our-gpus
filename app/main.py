@@ -91,6 +91,9 @@ async def start_ingest(
         return IngestResponse(scan_id=scan.id, status=scan.status, task_id=f"task-{scan.id}")
 
     # Original logic for JSON/JSONL files
+    if not file:
+        raise HTTPException(400, "No file provided")
+        
     field_mapping = json.loads(field_map) if field_map else {}
     scan = Scan(
         source_file=file.filename if file else source,
@@ -101,13 +104,37 @@ async def start_ingest(
     session.commit()
     session.refresh(scan)
 
-    # Queue async task
-    # from worker.tasks import process_ingest
-    # task = process_ingest.delay(scan.id, file.file.read() if file else None)
-    # For now, return a dummy task ID
-    task_id = f"task-{scan.id}"
+    # Process synchronously for now (simplified approach)
+    try:
+        file_content = await file.read()
+        ingest_service = IngestService(session)
+        
+        # Set scan to processing
+        scan.status = "processing"
+        scan.started_at = datetime.now()
+        session.commit()
+        
+        # Process the file
+        records = list(ingest_service.parse_stream(file_content, field_mapping))
+        scan.total_rows = len(records)
+        session.commit()
+        
+        success, failed = ingest_service.process_batch(records, scan.id or 0)
 
-    return IngestResponse(scan_id=scan.id, status="queued", task_id=task_id)
+        # Update scan status
+        scan.status = "completed"
+        scan.completed_at = datetime.now()
+        scan.processed_rows = success + failed
+        scan.stats_json = json.dumps({"success": success, "failed": failed})
+        session.commit()
+
+        return IngestResponse(scan_id=scan.id, status="completed", task_id=f"sync-{scan.id}")
+        
+    except Exception as e:
+        scan.status = "failed"
+        scan.error_message = str(e)
+        session.commit()
+        raise HTTPException(500, f"Processing failed: {str(e)}")
 
 
 @app.get("/api/scans/{scan_id}", response_model=ScanResponse)

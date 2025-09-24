@@ -20,18 +20,34 @@ export default function Upload() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [completed, setCompleted] = useState(false);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [detectedFormat, setDetectedFormat] = useState<string | null>(null);
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setFile(file);
+    setSchema(null);
+    setParseError(null);
+    setError(null);
+    setDetectedFormat(null);
 
     // Sample file to infer schema
     const reader = new FileReader();
     reader.onload = async (e) => {
       const text = e.target?.result as string;
-      const lines = text.split("\n").slice(0, 10);
+      
+      // For JSONL detection and parsing, we want complete lines only
+      // Find the last complete newline to avoid partial JSON strings
+      let completeText = text;
+      const lastNewline = text.lastIndexOf('\n');
+      if (lastNewline > 0 && lastNewline < text.length - 1) {
+        // Only use text up to the last complete line
+        completeText = text.substring(0, lastNewline);
+      }
+      
+      const lines = completeText.split("\n").slice(0, 20).filter(l => l.trim());
 
       try {
         // Check if this is a text file with ip:port format
@@ -57,41 +73,97 @@ export default function Upload() {
         // JSON/JSONL parsing
         let sampleRecords = [];
         
-        // Try to parse as complete JSON first (array or object)
-        try {
-          const fullContent = JSON.parse(text.trim());
-          if (Array.isArray(fullContent)) {
-            sampleRecords = fullContent.slice(0, 10);
-          } else if (typeof fullContent === 'object' && fullContent !== null) {
-            sampleRecords = [fullContent];
-          }
-        } catch {
-          // Fall back to JSONL parsing (line by line)
+        // First, try to detect if this looks like JSONL by checking if first few lines are valid JSON objects
+        const firstFewLines = lines.slice(0, 3).filter(l => l.trim());
+        let looksLikeJsonl = false;
+        
+        if (firstFewLines.length > 0) {
+          const validJsonLines = firstFewLines.filter(line => {
+            try {
+              const parsed = JSON.parse(line.trim());
+              return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+            } catch {
+              return false;
+            }
+          });
+          looksLikeJsonl = validJsonLines.length >= Math.min(2, firstFewLines.length);
+        }
+        
+        if (looksLikeJsonl || file.name.endsWith(".jsonl")) {
+          // Parse as JSONL (line by line)
+          setDetectedFormat("JSONL (JSON Lines)");
           sampleRecords = lines
             .filter((l) => l.trim())
-            .map((l) => {
+            .map((l, index) => {
               try {
                 return JSON.parse(l.trim());
-              } catch {
+              } catch (lineError) {
+                console.warn(`Failed to parse line ${index + 1}: ${l.trim()}`);
                 return null;
               }
             })
             .filter(record => record !== null)
             .slice(0, 10);
+        } else {
+          // Try to parse as complete JSON (array or object)
+          try {
+            const fullContent = JSON.parse(completeText.trim());
+            if (Array.isArray(fullContent)) {
+              setDetectedFormat("JSON Array");
+              sampleRecords = fullContent.slice(0, 10);
+            } else if (typeof fullContent === 'object' && fullContent !== null) {
+              setDetectedFormat("JSON Object");
+              sampleRecords = [fullContent];
+            }
+          } catch (jsonError) {
+            // If complete JSON parsing fails, try JSONL as fallback
+            try {
+              sampleRecords = lines
+                .filter((l) => l.trim())
+                .map((l) => {
+                  try {
+                    return JSON.parse(l.trim());
+                  } catch {
+                    return null;
+                  }
+                })
+                .filter(record => record !== null)
+                .slice(0, 10);
+                
+              if (sampleRecords.length === 0) {
+                setParseError(`Unable to parse file as JSON or JSONL. Error: ${jsonError instanceof Error ? jsonError.message : 'Unknown parsing error'}`);
+                return;
+              } else {
+                setDetectedFormat("JSONL (auto-detected)");
+              }
+            } catch {
+              setParseError(`Invalid JSON format: ${jsonError instanceof Error ? jsonError.message : 'Unable to parse JSON'}`);
+              return;
+            }
+          }
         }
 
         if (sampleRecords.length === 0) {
-          console.error("No valid JSON records found");
+          setParseError("No valid JSON records found. Please check your file format.");
           return;
         }
 
         const fields: Record<string, string> = {};
         sampleRecords.forEach((record) => {
-          Object.keys(record).forEach((key) => {
-            if (!fields[key]) {
-              fields[key] = typeof record[key];
-            }
-          });
+          if (record && typeof record === 'object') {
+            Object.keys(record).forEach((key) => {
+              if (!fields[key]) {
+                const value = record[key];
+                if (value === null || value === undefined) {
+                  fields[key] = 'null';
+                } else if (Array.isArray(value)) {
+                  fields[key] = 'array';
+                } else {
+                  fields[key] = typeof value;
+                }
+              }
+            });
+          }
         });
 
         setSchema({
@@ -101,19 +173,40 @@ export default function Upload() {
 
         // Auto-detect common mappings
         const autoMapping: Record<string, string> = {};
+        
+        // IP address mapping
         if ("ip" in fields) autoMapping.ip = "ip";
-        if ("host" in fields) autoMapping.ip = "host";
+        else if ("host" in fields) autoMapping.ip = "host";
+        else if ("address" in fields) autoMapping.ip = "address";
+        else if ("ip_address" in fields) autoMapping.ip = "ip_address";
+        
+        // Port mapping
         if ("port" in fields) autoMapping.port = "port";
+        else if ("port_number" in fields) autoMapping.port = "port_number";
+        
+        // Geography mappings
         if ("country" in fields) autoMapping.geo_country = "country";
+        else if ("geo_country" in fields) autoMapping.geo_country = "geo_country";
+        else if ("country_code" in fields) autoMapping.geo_country = "country_code";
+        
         if ("city" in fields) autoMapping.geo_city = "city";
+        else if ("geo_city" in fields) autoMapping.geo_city = "geo_city";
+        
+        // Tags mapping
+        if ("tags" in fields) autoMapping.tags = "tags";
+        else if ("tag" in fields) autoMapping.tags = "tag";
+        else if ("labels" in fields) autoMapping.tags = "labels";
 
         setMapping(autoMapping);
       } catch (err) {
         console.error("Failed to parse sample:", err);
+        setParseError(`Failed to parse file: ${err instanceof Error ? err.message : 'Unknown error'}`);
       }
     };
 
-    reader.readAsText(file.slice(0, 100000)); // Read first 100KB
+    // Read first 200KB to get enough sample data while avoiding memory issues
+    const sampleSize = Math.min(file.size, 200000);
+    reader.readAsText(file.slice(0, sampleSize));
   };
 
   const resetUpload = () => {
@@ -121,6 +214,8 @@ export default function Upload() {
     setSchema(null);
     setMapping({});
     setError(null);
+    setParseError(null);
+    setDetectedFormat(null);
     setCompleted(false);
     setProgress(0);
     setScanId(null);
@@ -235,26 +330,38 @@ export default function Upload() {
       )}
 
       {file && !uploading && !completed && (
-        <div className="bg-white rounded-lg shadow p-6">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
           <div className="flex items-center mb-4">
             <FileJson className="h-8 w-8 text-blue-500 mr-3" />
             <div>
-              <p className="font-medium text-gray-900">{file.name}</p>
-              <p className="text-sm text-gray-500">
+              <p className="font-medium text-gray-900 dark:text-white">{file.name}</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
                 {(file.size / (1024 * 1024)).toFixed(2)} MB
               </p>
             </div>
           </div>
 
-          {error && (
-            <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+          {(error || parseError) && (
+            <div className="mb-4 p-4 bg-red-50 dark:bg-red-900/50 border border-red-200 dark:border-red-800 rounded-lg">
               <div className="flex items-start">
                 <AlertCircle className="h-5 w-5 text-red-500 mr-2 flex-shrink-0 mt-0.5" />
                 <div>
-                  <p className="font-medium text-red-800">Upload Failed</p>
-                  <p className="text-sm text-red-700 mt-1">{error}</p>
+                  <p className="font-medium text-red-800 dark:text-red-200">
+                    {error ? 'Upload Failed' : 'Parse Error'}
+                  </p>
+                  <p className="text-sm text-red-700 dark:text-red-300 mt-1">
+                    {error || parseError}
+                  </p>
                 </div>
               </div>
+            </div>
+          )}
+
+          {detectedFormat && (
+            <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-800 rounded-lg">
+              <p className="text-sm text-blue-800 dark:text-blue-200">
+                <span className="font-medium">Detected format:</span> {detectedFormat}
+              </p>
             </div>
           )}
 
@@ -269,49 +376,67 @@ export default function Upload() {
               <div className="mt-6 flex gap-4">
                 <button
                   onClick={handleUpload}
-                  className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors"
+                  className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+                  disabled={!mapping.ip}
                 >
                   Start Ingestion
                 </button>
-                {error && (
-                  <button
-                    onClick={resetUpload}
-                    className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
-                  >
-                    Choose Different File
-                  </button>
-                )}
+                <button
+                  onClick={resetUpload}
+                  className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                >
+                  Choose Different File
+                </button>
               </div>
             </>
+          )}
+
+          {!schema && !parseError && (
+            <div className="mt-4 p-4 bg-blue-50 dark:bg-blue-900/50 border border-blue-200 dark:border-blue-800 rounded-lg">
+              <p className="text-sm text-blue-800 dark:text-blue-200">
+                Parsing file... Please wait while we analyze your data structure.
+              </p>
+            </div>
+          )}
+
+          {parseError && !schema && (
+            <div className="mt-4 flex gap-4">
+              <button
+                onClick={resetUpload}
+                className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+              >
+                Choose Different File
+              </button>
+            </div>
           )}
         </div>
       )}
 
       {uploading && !completed && (
-        <div className="bg-white rounded-lg shadow p-6">
-          <h3 className="text-lg font-medium mb-4">Processing...</h3>
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+          <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Processing...</h3>
           <ProgressBar progress={progress} />
           {scanId && (
-            <p className="text-sm text-gray-500 mt-2">Scan ID: {scanId}</p>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-2">Scan ID: {scanId}</p>
           )}
         </div>
       )}
 
       {completed && (
-        <div className="bg-white rounded-lg shadow p-6">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
           <div className="flex items-center justify-center mb-4">
             <CheckCircle className="h-12 w-12 text-green-500 mr-4" />
             <div>
-              <h3 className="text-lg font-medium text-green-800">
+              <h3 className="text-lg font-medium text-green-800 dark:text-green-400">
                 Upload Completed!
               </h3>
-              <p className="text-sm text-green-600">
+              <p className="text-sm text-green-600 dark:text-green-500">
                 Redirecting to hosts page...
               </p>
             </div>
           </div>
           {scanId && (
-            <p className="text-sm text-gray-500 text-center">
+            <p className="text-sm text-gray-500 dark:text-gray-400 text-center">
               Scan ID: {scanId}
             </p>
           )}
