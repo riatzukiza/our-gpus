@@ -71,12 +71,18 @@ export default function Upload() {
             .filter((l) => l.trim())
             .map((l) => {
               try {
-                return JSON.parse(l);
+                return JSON.parse(l.trim());
               } catch {
                 return null;
               }
             })
-            .filter(record => record !== null);
+            .filter(record => record !== null)
+            .slice(0, 10);
+        }
+
+        if (sampleRecords.length === 0) {
+          console.error("No valid JSON records found");
+          return;
         }
 
         const fields: Record<string, string> = {};
