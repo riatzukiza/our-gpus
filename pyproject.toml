@@ -24,6 +24,11 @@ minversion = "7.0"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra -q --strict-markers"
+# Clean up test database files after test runs
+filterwarnings = [
+    "ignore::DeprecationWarning:pydantic.*",
+    "ignore::DeprecationWarning:fastapi.*",
+]
 
 [tool.coverage.run]
 source = ["app", "worker"]

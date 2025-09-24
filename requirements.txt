@@ -8,7 +8,7 @@ pydantic-settings==2.4.0
 httpx==0.27.0
 celery[redis]==5.4.0
 redis==5.0.7
-python-multipart==0.0.9
+python-multipart==0.0.18
 ijson==3.3.0
 aiofiles==24.1.0
 prometheus-client==0.20.0

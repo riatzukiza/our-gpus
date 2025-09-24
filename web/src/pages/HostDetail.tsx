@@ -2,7 +2,7 @@ import { useParams } from 'react-router-dom'
 import { useQuery } from 'react-query'
 import axios from 'axios'
 import { format } from 'date-fns'
-import { Cpu, HardDrive, Clock, Globe, Server, Zap, Play, Send } from 'lucide-react'
+import { Cpu, HardDrive, Clock, Globe, Server, Zap, Send } from 'lucide-react'
 import { useState } from 'react'
 
 export default function HostDetail() {

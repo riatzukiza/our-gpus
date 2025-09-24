@@ -1,9 +1,9 @@
-import pytest
-import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.db import Host
 from app.probe import ProbeService
-from app.db import Host, Probe
 
 
 @pytest.fixture
@@ -32,11 +32,11 @@ async def test_probe_success(probe_service, mock_host):
                 {"name": "llama2:7b", "size": 3825819648}
             ]
         }
-        
+
         mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_response)
-        
+
         probe = await probe_service.probe_host(mock_host)
-        
+
         assert probe.status == "success"
         assert probe.host_id == 1
         assert mock_host.status == "online"
@@ -49,9 +49,9 @@ async def test_probe_timeout(probe_service, mock_host):
         mock_client.return_value.__aenter__.return_value.get = AsyncMock(
             side_effect=httpx.TimeoutException("timeout")
         )
-        
+
         probe = await probe_service.probe_host(mock_host)
-        
+
         assert probe.status == "timeout"
         assert probe.error == "Connection timeout"
         assert mock_host.status == "timeout"
@@ -62,11 +62,11 @@ async def test_probe_non_ollama(probe_service, mock_host):
     with patch('httpx.AsyncClient') as mock_client:
         mock_response = MagicMock()
         mock_response.status_code = 404
-        
+
         mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_response)
-        
+
         probe = await probe_service.probe_host(mock_host)
-        
+
         assert probe.status == "non_ollama"
         assert mock_host.status == "non_ollama"
 
@@ -86,9 +86,9 @@ def test_extract_models(probe_service):
             }
         ]
     }
-    
+
     models = probe_service.extract_models(tags_data)
-    
+
     assert len(models) == 2
     assert models[0]["name"] == "llama2:7b"
     assert models[0]["family"] == "llama"
@@ -110,10 +110,10 @@ def test_extract_parameters(probe_service):
             "parameter_size": "7B"
         }
     }
-    
+
     params = probe_service._extract_parameters(model_data)
     assert params == "7B"
-    
+
     # Test extraction from name
     model_data = {"name": "llama2:13b-chat"}
     params = probe_service._extract_parameters(model_data)
