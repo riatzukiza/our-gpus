@@ -158,7 +158,13 @@ export default function Explore() {
         if (filters.gpu !== null) params.append('gpu', String(filters.gpu))
         if (filters.status) params.append('status', filters.status)
         
-        await axios.delete(`/api/hosts/filtered?${params.toString()}`)
+        console.log('Clearing hosts with filters:', { model: filters.model, family: filters.family, gpu: filters.gpu, status: filters.status })
+        await axios.post('/api/hosts/clear-filtered', {
+          model: filters.model || null,
+          family: filters.family || null,
+          gpu: filters.gpu,
+          status: filters.status || null
+        })
         alert(`Filtered hosts have been cleared successfully`)
       } else {
         await axios.delete('/api/hosts')
@@ -170,6 +176,10 @@ export default function Explore() {
       setPage(1)
     } catch (error) {
       console.error('Failed to clear hosts:', error)
+      if (error.response) {
+        console.error('Error response:', error.response.data)
+        console.error('Error status:', error.response.status)
+      }
       alert('Failed to clear hosts. Please try again.')
     } finally {
       setClearing(false)

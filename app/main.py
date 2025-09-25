@@ -24,6 +24,7 @@ from app.schemas import (
     PromptResponse,
     ScanResponse,
 )
+from pydantic import BaseModel
 
 app = FastAPI(title="our gpu API", version="1.0.0")
 
@@ -674,12 +675,16 @@ async def clear_all_hosts(session: Session = Depends(get_session)):
     return {"message": f"Cleared {host_count} hosts and related data"}
 
 
-@app.delete("/api/hosts/filtered")
+class ClearFilteredHostsRequest(BaseModel):
+    model: str | None = None
+    family: str | None = None
+    gpu: bool | None = None
+    status: str | None = None
+
+
+@app.post("/api/hosts/clear-filtered")
 async def clear_filtered_hosts(
-    model: str | None = None,
-    family: str | None = None,
-    gpu: bool | None = None,
-    status: str | None = None,
+    request: ClearFilteredHostsRequest,
     session: Session = Depends(get_session),
 ):
     """Clear hosts that match the specified filters"""
@@ -687,23 +692,23 @@ async def clear_filtered_hosts(
     query = select(Host)
     
     # Apply the same filters as the list_hosts endpoint
-    needs_model_join = bool(model or family)
+    needs_model_join = bool(request.model or request.family)
     if needs_model_join:
         query = query.join(HostModel).join(Model)
     
-    if model:
-        query = query.where(Model.name.contains(model))
-    if family:
-        query = query.where(Model.family == family)
-    if gpu is not None:
-        if gpu:
+    if request.model:
+        query = query.where(Model.name.contains(request.model))
+    if request.family:
+        query = query.where(Model.family == request.family)
+    if request.gpu is not None:
+        if request.gpu:
             query = query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
         else:
             query = query.where(
                 (Host.gpu.is_(None)) & ((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb.is_(None)))
             )
-    if status:
-        query = query.where(Host.status == status)
+    if request.status:
+        query = query.where(Host.status == request.status)
     
     # Get hosts to delete
     hosts_to_delete = session.exec(query).all()
@@ -713,13 +718,20 @@ async def clear_filtered_hosts(
         return {"message": "No hosts match the specified filters", "cleared_count": 0}
     
     # Delete related records first
-    session.exec(select(HostModel).where(HostModel.host_id.in_(host_ids_to_delete))).all()
-    for hm in session.exec(select(HostModel).where(HostModel.host_id.in_(host_ids_to_delete))).all():
-        session.delete(hm)
-    
-    session.exec(select(Probe).where(Probe.host_id.in_(host_ids_to_delete))).all()
-    for probe in session.exec(select(Probe).where(Probe.host_id.in_(host_ids_to_delete))).all():
-        session.delete(probe)
+    if host_ids_to_delete:
+        # Delete HostModel records
+        host_models = session.exec(
+            select(HostModel).where(HostModel.host_id.in_(host_ids_to_delete))
+        ).all()
+        for hm in host_models:
+            session.delete(hm)
+        
+        # Delete Probe records
+        probes = session.exec(
+            select(Probe).where(Probe.host_id.in_(host_ids_to_delete))
+        ).all()
+        for probe in probes:
+            session.delete(probe)
     
     # Delete the hosts
     deleted_count = 0
