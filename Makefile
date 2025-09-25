@@ -23,11 +23,11 @@ test:
 
 lint:
 	ruff check app/ worker/ cli/ tests/
-	cd web && npm run lint
+	cd web && bun run lint
 
 fmt:
 	ruff format app/ worker/ cli/ tests/
-	cd web && npm run format
+	cd web && bun run format
 
 build:
 	docker compose build
@@ -55,7 +55,7 @@ probe:
 
 install:
 	pip install -r requirements.txt
-	cd web && npm install
+	cd web && bun install
 
 migrate:
 	alembic upgrade head

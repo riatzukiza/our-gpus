@@ -82,7 +82,7 @@ python cli/rescan_hosts.py --gpu --concurrency 50
 ```bash
 # Install dependencies
 pip install -r requirements.txt
-cd web && npm install
+cd web && bun install  # Requires Bun to be installed (https://bun.sh/)
 
 # Run tests
 pytest tests/

@@ -9,8 +9,10 @@
 - Test: `make test` or `pytest tests/ -v`
 
 ### Frontend (React)
-- Lint: `cd web && npm run lint`
-- Format: `cd web && npm run format`
+- Lint: `cd web && bun run lint`
+- Format: `cd web && bun run format`
+
+Note: Requires Bun to be installed (https://bun.sh/)
 
 ## Code Style Guidelines
 

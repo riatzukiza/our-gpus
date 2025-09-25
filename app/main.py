@@ -266,11 +266,15 @@ async def list_hosts(
     # Build base query for counting
     base_query = select(Host)
 
-    # Apply filters
+    # Apply filters - handle joins carefully to avoid duplicates
+    needs_model_join = bool(model or family)
+    if needs_model_join:
+        base_query = base_query.join(HostModel).join(Model)
+    
     if model:
-        base_query = base_query.join(HostModel).join(Model).where(Model.name.contains(model))
+        base_query = base_query.where(Model.name.contains(model))
     if family:
-        base_query = base_query.join(HostModel).join(Model).where(Model.family == family)
+        base_query = base_query.where(Model.family == family)
     if gpu is not None:
         if gpu:
             base_query = base_query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
@@ -407,6 +411,32 @@ async def list_models(session: Session = Depends(get_session)):
         )
         for m in models
     ]
+
+
+@app.get("/api/models/names")
+async def list_model_names(session: Session = Depends(get_session)):
+    """Get unique model names for filter dropdown"""
+    model_names = session.exec(
+        select(Model.name)
+        .join(HostModel)
+        .group_by(Model.name)
+        .order_by(Model.name)
+    ).all()
+    
+    return {"models": model_names}
+
+
+@app.get("/api/models/families")
+async def list_model_families(session: Session = Depends(get_session)):
+    """Get unique model families for filter dropdown"""
+    families = session.exec(
+        select(Model.family)
+        .join(HostModel)
+        .group_by(Model.family)
+        .order_by(Model.family)
+    ).all()
+    
+    return {"families": families}
 
 
 @app.get("/api/export")

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from 'react-query'
-import { Search, Download, RefreshCw, Cpu, Wifi, WifiOff, Trash2 } from 'lucide-react'
+import { Search, Download, RefreshCw, Cpu, Wifi, WifiOff, Trash2, ArrowUpDown, ArrowUp, ArrowDown, AlertCircle, Clock, HelpCircle } from 'lucide-react'
 import axios from 'axios'
 import { Link } from 'react-router-dom'
 import { format } from 'date-fns'
@@ -26,6 +26,7 @@ export default function Explore() {
     gpu: null as boolean | null,
     status: ''
   })
+  const [sortBy, setSortBy] = useState('last_seen')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(50)
   const [clearing, setClearing] = useState(false)
@@ -33,6 +34,40 @@ export default function Explore() {
   const [probeMessage, setProbeMessage] = useState('')
   const [probeStats, setProbeStats] = useState<any>(null)
   const queryClient = useQueryClient()
+
+  // Fetch available model names for dropdown
+  const { data: modelNamesData, isLoading: modelsLoading } = useQuery(
+    ['model-names'],
+    async () => {
+      const response = await axios.get('/api/models/names')
+      return response.data.models as string[]
+    },
+    {
+      retry: 1,
+      staleTime: 5 * 60 * 1000, // 5 minutes
+      cacheTime: 10 * 60 * 1000, // 10 minutes
+    }
+  )
+
+  // Use empty array as fallback if data is not available
+  const modelNames = modelNamesData || []
+
+  // Fetch available model families for family filter
+  const { data: modelFamiliesData } = useQuery(
+    ['model-families'],
+    async () => {
+      const response = await axios.get('/api/models/families')
+      return response.data.families as string[]
+    },
+    {
+      retry: 1,
+      staleTime: 5 * 60 * 1000, // 5 minutes
+      cacheTime: 10 * 60 * 1000, // 10 minutes
+    }
+  )
+
+  // Use empty array as fallback if data is not available
+  const modelFamilies = modelFamiliesData || []
 
   const startProbePolling = () => {
     const pollInterval = setInterval(async () => {
@@ -66,11 +101,12 @@ export default function Explore() {
   }
 
   const { data, isLoading, refetch } = useQuery(
-    ['hosts', page, pageSize, filters, search],
+    ['hosts', page, pageSize, filters, search, sortBy],
     async () => {
       const params = new URLSearchParams({
         page: page.toString(),
         size: pageSize.toString(),
+        sort: sortBy,
         ...(filters.model && { model: filters.model }),
         ...(filters.family && { family: filters.family }),
         ...(filters.gpu !== null && { gpu: filters.gpu.toString() }),
@@ -223,8 +259,10 @@ export default function Explore() {
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'online': return 'text-green-500'
-      case 'offline': return 'text-red-500'
-      case 'error': return 'text-orange-500'
+      case 'timeout': return 'text-yellow-500'
+      case 'error': return 'text-red-500'
+      case 'non_ollama': return 'text-blue-500'
+      case 'unknown': return 'text-gray-500'
       default: return 'text-gray-500'
     }
   }
@@ -232,8 +270,11 @@ export default function Explore() {
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'online': return <Wifi className="w-4 h-4" />
-      case 'offline': return <WifiOff className="w-4 h-4" />
-      default: return <Wifi className="w-4 h-4" />
+      case 'timeout': return <Clock className="w-4 h-4" />
+      case 'error': return <AlertCircle className="w-4 h-4" />
+      case 'non_ollama': return <WifiOff className="w-4 h-4" />
+      case 'unknown': return <HelpCircle className="w-4 h-4" />
+      default: return <HelpCircle className="w-4 h-4" />
     }
   }
 
@@ -251,31 +292,34 @@ export default function Explore() {
       </div>
       
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow mb-6 p-4">
-        <div className="flex items-center space-x-4">
+        {/* Search and basic filters row */}
+        <div className="flex items-center space-x-4 mb-4">
           <div className="flex-1 relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
             <input
               type="text"
               placeholder="Search by model, IP, or location..."
-              className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
           
           <select
-            className="px-4 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             value={filters.status}
             onChange={(e) => setFilters({ ...filters, status: e.target.value })}
           >
             <option value="">All Status</option>
             <option value="online">Online</option>
-            <option value="offline">Offline</option>
+            <option value="timeout">Timeout</option>
             <option value="error">Error</option>
+            <option value="non_ollama">Non-Ollama</option>
+            <option value="unknown">Unknown</option>
           </select>
           
           <select
-            className="px-4 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             value={filters.gpu === null ? '' : filters.gpu.toString()}
             onChange={(e) => setFilters({ ...filters, gpu: e.target.value === '' ? null : e.target.value === 'true' })}
           >
@@ -285,7 +329,7 @@ export default function Explore() {
           </select>
           
           <select
-            className="px-4 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             value={pageSize.toString()}
             onChange={(e) => {
               setPageSize(parseInt(e.target.value))
@@ -298,35 +342,123 @@ export default function Explore() {
             <option value="100">100 per page</option>
           </select>
           
+          <select
+            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value)}
+            title="Sort by"
+          >
+            <option value="last_seen">Sort: Last Seen</option>
+            <option value="latency">Sort: Latency</option>
+          </select>
+          
+          <button
+            onClick={() => {
+              setFilters({ model: '', family: '', gpu: null, status: '' })
+              setSearch('')
+              setSortBy('last_seen')
+              setPage(1)
+            }}
+            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors text-gray-700 dark:text-gray-300"
+            title="Clear all filters"
+          >
+            Clear
+          </button>
+          
           <button
             onClick={() => handleProbe()}
             disabled={probing}
-            className={`px-4 py-2 ${probing ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'} text-white rounded-lg transition-colors flex items-center`}
+            className={`px-3 py-2 text-sm ${probing ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'} text-white rounded-lg transition-colors flex items-center`}
             title={`Probe ${totalHosts} hosts${Object.values(filters).some(v => v !== null && v !== '') ? ' (filtered)' : ' (all hosts)'}`}
           >
-            <RefreshCw className={`w-4 h-4 mr-2 ${probing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3 h-3 mr-1.5 ${probing ? 'animate-spin' : ''}`} />
             {probing 
               ? 'Probing...' 
-              : `Probe ${Object.values(filters).some(v => v !== null && v !== '') ? 'Filtered' : 'All'} (${totalHosts})`
+              : `Probe (${totalHosts})`
             }
           </button>
           
           <button
             onClick={() => handleExport('csv')}
-            className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors flex items-center text-gray-700 dark:text-gray-300"
+            className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors flex items-center text-gray-700 dark:text-gray-300"
           >
-            <Download className="w-4 h-4 mr-2" />
+            <Download className="w-3 h-3 mr-1.5" />
             Export
           </button>
           
           <button
             onClick={handleClearHosts}
             disabled={clearing}
-            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center"
+            className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center"
           >
-            <Trash2 className="w-4 h-4 mr-2" />
+            <Trash2 className="w-3 h-3 mr-1.5" />
             {clearing ? 'Clearing...' : 'Clear All'}
           </button>
+        </div>
+        
+        {/* Model filter row */}
+        <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-2">
+            <label className="text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">
+              Model Family:
+            </label>
+            <select
+              className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={filters.family}
+              onChange={(e) => setFilters({ ...filters, family: e.target.value })}
+              disabled={!modelFamilies.length}
+            >
+              <option value="">{!modelFamilies.length ? 'Loading families...' : 'All Families'}</option>
+              {modelFamilies.length > 0 && modelFamilies.map((family: string) => (
+                <option key={family} value={family}>
+                  {family.charAt(0).toUpperCase() + family.slice(1)}
+                </option>
+              ))}
+            </select>
+          </div>
+          
+          <div className="flex items-center space-x-2">
+            <label className="text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">
+              Specific Model:
+            </label>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-3 h-3" />
+              <select
+                className="pl-7 pr-3 py-2 text-sm border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-48 max-w-80"
+                value={filters.model}
+                onChange={(e) => setFilters({ ...filters, model: e.target.value })}
+                disabled={modelsLoading || !modelNames.length}
+                title={filters.model || 'Select a model to filter'}
+              >
+                <option value="">{modelsLoading ? 'Loading models...' : !modelNames.length ? 'No models available' : `All Models (${modelNames.length})`}</option>
+                {modelNames.length > 0 && modelNames.map((modelName: string) => (
+                  <option key={modelName} value={modelName} title={modelName}>
+                    {modelName.length > 40 ? modelName.substring(0, 40) + '...' : modelName}
+                  </option>
+              ))}
+              </select>
+            </div>
+            {filters.model && (
+              <button
+                onClick={() => setFilters({ ...filters, model: '' })}
+                className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                title="Clear model filter"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+          
+          {(filters.model || filters.family) && (
+            <div className="text-sm text-gray-600 dark:text-gray-400">
+              {filters.family && (
+                <span>Family: <span className="font-medium text-blue-600 dark:text-blue-400">{filters.family}</span></span>
+              )}
+              {filters.model && (
+                <span>{filters.family && ' • '}Model: <span className="font-medium text-blue-600 dark:text-blue-400">{filters.model}</span></span>
+              )}
+            </div>
+          )}
         </div>
       </div>
       
@@ -355,111 +487,145 @@ export default function Explore() {
         </div>
       )}
       
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-          <thead className="bg-gray-50 dark:bg-gray-700">
-            <tr>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                Host
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                Status
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                Version
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                Latency
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                Models
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                System
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                Last Seen
-              </th>
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                Actions
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-            {hosts?.map((host) => (
-              <tr key={host.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <Link to={`/host/${host.id}`} className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300">
-                    {host.ip}:{host.port}
-                  </Link>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <span className={`inline-flex items-center ${getStatusColor(host.status)}`}>
-                    {getStatusIcon(host.status)}
-                    <span className="ml-2 capitalize">{host.status}</span>
-                  </span>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                  {host.api_version || '-'}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                  {host.latency_ms ? `${Math.round(host.latency_ms)}ms` : '-'}
-                </td>
-                <td className="px-6 py-4">
-                  <div className="flex flex-wrap gap-1">
-                    {host.models.slice(0, 3).map((model, idx) => (
-                      <span key={idx} className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded">
-                        {model}
-                      </span>
-                    ))}
-                    {host.models.length > 3 && (
-                      <span className="px-2 py-1 text-xs bg-gray-100 text-gray-600 rounded">
-                        +{host.models.length - 3}
-                      </span>
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-x-auto">
+        <div className="min-w-[1200px]">
+          <table className="w-full divide-y divide-gray-200 dark:divide-gray-700 table-fixed">
+            <colgroup>
+              <col className="w-36" /> {/* Host */}
+              <col className="w-24" /> {/* Status */}
+              <col className="w-20" /> {/* Version */}
+              <col className="w-24" /> {/* Latency */}
+              <col className="w-80" /> {/* Models */}
+              <col className="w-28" /> {/* System */}
+              <col className="w-24" /> {/* Last Seen */}
+              <col className="w-20" /> {/* Actions */}
+            </colgroup>
+            <thead className="bg-gray-50 dark:bg-gray-700">
+              <tr>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider truncate">
+                  Host
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider truncate">
+                  Status
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider truncate">
+                  Version
+                </th>
+                <th 
+                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-600 truncate"
+                  onClick={() => setSortBy(sortBy === 'latency' ? 'last_seen' : 'latency')}
+                >
+                  <div className="flex items-center space-x-1">
+                    <span>Latency</span>
+                    {sortBy === 'latency' ? (
+                      <ArrowUp className="w-3 h-3 flex-shrink-0" />
+                    ) : (
+                      <ArrowUpDown className="w-3 h-3 flex-shrink-0" />
                     )}
                   </div>
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                  {host.gpu === 'available' || host.gpu_vram_mb ? (
-                    <span className="inline-flex items-center">
-                      <Cpu className="w-4 h-4 mr-1 text-green-500" />
-                      {host.gpu_vram_mb ? 
-                        `GPU ${(host.gpu_vram_mb / 1024).toFixed(1)}GB` : 
-                        'GPU Available'
-                      }
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center">
-                      <Cpu className="w-4 h-4 mr-1 text-gray-400" />
-                      CPU Only
-                    </span>
-                  )}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                  {format(new Date(host.last_seen), 'MMM d, HH:mm')}
-                </td>
-                <td className="px-6 py-4 whitespace-nowrap text-sm">
-                  <div className="flex items-center space-x-2">
-                    <button
-                      onClick={() => handleProbe(host.id)}
-                      className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300"
-                      title="Probe host"
-                    >
-                      <RefreshCw className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => handleDeleteHost(host.id)}
-                      className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300"
-                      title="Delete host"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider truncate">
+                  Models
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider truncate">
+                  System
+                </th>
+                <th 
+                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-600 truncate"
+                  onClick={() => setSortBy(sortBy === 'last_seen' ? 'latency' : 'last_seen')}
+                >
+                  <div className="flex items-center space-x-1">
+                    <span className="truncate">Last Seen</span>
+                    {sortBy === 'last_seen' ? (
+                      <ArrowDown className="w-3 h-3 flex-shrink-0" />
+                    ) : (
+                      <ArrowUpDown className="w-3 h-3 flex-shrink-0" />
+                    )}
                   </div>
-                </td>
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider truncate">
+                  Actions
+                </th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+              {hosts?.map((host, index) => (
+                <tr key={`host-${host.id}-${host.ip}-${index}`} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                  <td className="px-4 py-3 whitespace-nowrap truncate">
+                    <Link to={`/host/${host.id}`} className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 text-sm">
+                      {host.ip}:{host.port}
+                    </Link>
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap truncate">
+                    <span className={`inline-flex items-center ${getStatusColor(host.status)}`}>
+                      {getStatusIcon(host.status)}
+                      <span className="ml-1 text-sm capitalize">{host.status === 'non_ollama' ? 'Non-Ollama' : host.status}</span>
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 truncate">
+                    {host.api_version || '-'}
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 truncate">
+                    {host.latency_ms ? `${Math.round(host.latency_ms)}ms` : '-'}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap gap-1 max-h-16 overflow-hidden">
+                      {host.models.slice(0, 2).map((model, idx) => (
+                        <span key={`${host.id}-model-${idx}`} className="px-2 py-1 text-xs bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 rounded truncate max-w-32" title={model}>
+                          {model.length > 15 ? model.substring(0, 12) + '...' : model}
+                        </span>
+                      ))}
+                      {host.models.length > 2 && (
+                        <span className="px-2 py-1 text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded" title={`${host.models.length - 2} more models`}>
+                          +{host.models.length - 2}
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 truncate">
+                    {host.gpu === 'available' || host.gpu_vram_mb ? (
+                      <span className="inline-flex items-center">
+                        <Cpu className="w-4 h-4 mr-1 text-green-500 flex-shrink-0" />
+                        <span className="truncate">
+                          {host.gpu_vram_mb ? 
+                            `${(host.gpu_vram_mb / 1024).toFixed(1)}GB` : 
+                            'GPU'
+                          }
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center">
+                        <Cpu className="w-4 h-4 mr-1 text-gray-400 flex-shrink-0" />
+                        <span className="truncate">CPU</span>
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 truncate">
+                    {format(new Date(host.last_seen), 'MMM d, HH:mm')}
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap text-sm">
+                    <div className="flex items-center space-x-1">
+                      <button
+                        onClick={() => handleProbe(host.id)}
+                        className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 p-1 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
+                        title="Probe host"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={() => handleDeleteHost(host.id)}
+                        className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 p-1 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors"
+                        title="Delete host"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
         
         {isLoading && (
           <div className="flex justify-center py-8">
@@ -524,7 +690,7 @@ export default function Explore() {
                   // Show all pages if 7 or fewer
                   Array.from({ length: totalPages }, (_, i) => i + 1).map(pageNum => (
                     <button
-                      key={pageNum}
+                      key={`page-${pageNum}`}
                       onClick={() => setPage(pageNum)}
                       className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
                         pageNum === page
@@ -561,7 +727,7 @@ export default function Explore() {
                       .filter((v, i, a) => a.indexOf(v) === i)
                       .map(pageNum => (
                         <button
-                          key={pageNum}
+                          key={`page-ellipsis-${pageNum}`}
                           onClick={() => setPage(pageNum)}
                           className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
                             pageNum === page
