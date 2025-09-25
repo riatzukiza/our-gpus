@@ -674,6 +674,64 @@ async def clear_all_hosts(session: Session = Depends(get_session)):
     return {"message": f"Cleared {host_count} hosts and related data"}
 
 
+@app.delete("/api/hosts/filtered")
+async def clear_filtered_hosts(
+    model: str | None = None,
+    family: str | None = None,
+    gpu: bool | None = None,
+    status: str | None = None,
+    session: Session = Depends(get_session),
+):
+    """Clear hosts that match the specified filters"""
+    # Build query to find hosts to delete
+    query = select(Host)
+    
+    # Apply the same filters as the list_hosts endpoint
+    needs_model_join = bool(model or family)
+    if needs_model_join:
+        query = query.join(HostModel).join(Model)
+    
+    if model:
+        query = query.where(Model.name.contains(model))
+    if family:
+        query = query.where(Model.family == family)
+    if gpu is not None:
+        if gpu:
+            query = query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
+        else:
+            query = query.where(
+                (Host.gpu.is_(None)) & ((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb.is_(None)))
+            )
+    if status:
+        query = query.where(Host.status == status)
+    
+    # Get hosts to delete
+    hosts_to_delete = session.exec(query).all()
+    host_ids_to_delete = [host.id for host in hosts_to_delete]
+    
+    if not host_ids_to_delete:
+        return {"message": "No hosts match the specified filters", "cleared_count": 0}
+    
+    # Delete related records first
+    session.exec(select(HostModel).where(HostModel.host_id.in_(host_ids_to_delete))).all()
+    for hm in session.exec(select(HostModel).where(HostModel.host_id.in_(host_ids_to_delete))).all():
+        session.delete(hm)
+    
+    session.exec(select(Probe).where(Probe.host_id.in_(host_ids_to_delete))).all()
+    for probe in session.exec(select(Probe).where(Probe.host_id.in_(host_ids_to_delete))).all():
+        session.delete(probe)
+    
+    # Delete the hosts
+    deleted_count = 0
+    for host in hosts_to_delete:
+        session.delete(host)
+        deleted_count += 1
+    
+    session.commit()
+    
+    return {"message": f"Cleared {deleted_count} hosts matching filters", "cleared_count": deleted_count}
+
+
 @app.get("/api/probe-stats")
 async def get_recent_probe_stats(
     minutes: int = Query(5, ge=1, le=60),

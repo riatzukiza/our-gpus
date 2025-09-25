@@ -132,21 +132,55 @@ export default function Explore() {
   const totalPages = data?.pages || 0
 
   const handleClearHosts = async () => {
-    if (!window.confirm('Are you sure you want to clear all hosts? This action cannot be undone.')) {
+    // Build filter description for confirmation dialog
+    const filterDescriptions = []
+    if (filters.model) filterDescriptions.push(`model: "${filters.model}"`)
+    if (filters.family) filterDescriptions.push(`family: "${filters.family}"`)
+    if (filters.gpu !== null) filterDescriptions.push(`GPU: ${filters.gpu ? 'available' : 'unavailable'}`)
+    if (filters.status) filterDescriptions.push(`status: "${filters.status}"`)
+    if (search) filterDescriptions.push(`search: "${search}"`)
+    
+    const hasActiveFilters = filterDescriptions.length > 0
+    const filterText = hasActiveFilters ? ` matching filters (${filterDescriptions.join(', ')})` : ''
+    
+    if (!window.confirm(`Are you sure you want to clear${hasActiveFilters ? ' filtered' : ' all'} hosts?${filterText ? `\n\nThis will only clear hosts${filterText}.` : ''}\n\nThis action cannot be undone.`)) {
       return
     }
     
     setClearing(true)
     try {
-      await axios.delete('/api/hosts')
+      // Use filtered endpoint if there are active filters, otherwise use the original endpoint
+      if (hasActiveFilters) {
+        // Build query parameters from current filters
+        const params = new URLSearchParams()
+        if (filters.model) params.append('model', filters.model)
+        if (filters.family) params.append('family', filters.family)
+        if (filters.gpu !== null) params.append('gpu', String(filters.gpu))
+        if (filters.status) params.append('status', filters.status)
+        
+        await axios.delete(`/api/hosts/filtered?${params.toString()}`)
+        alert(`Filtered hosts have been cleared successfully`)
+      } else {
+        await axios.delete('/api/hosts')
+        alert('All hosts have been cleared successfully')
+      }
+      
       queryClient.invalidateQueries(['hosts'])
-      alert('All hosts have been cleared successfully')
+      // Reset to page 1 after clearing
+      setPage(1)
     } catch (error) {
       console.error('Failed to clear hosts:', error)
       alert('Failed to clear hosts. Please try again.')
     } finally {
       setClearing(false)
     }
+  }
+
+  // Determine button text based on active filters
+  const getClearButtonText = () => {
+    if (clearing) return 'Clearing...'
+    const hasActiveFilters = filters.model || filters.family || filters.gpu !== null || filters.status || search
+    return hasActiveFilters ? 'Clear Filtered' : 'Clear All'
   }
 
   const handleDeleteHost = async (hostId: number) => {
@@ -390,9 +424,10 @@ export default function Explore() {
             onClick={handleClearHosts}
             disabled={clearing}
             className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center"
+            title={getClearButtonText()}
           >
             <Trash2 className="w-3 h-3 mr-1.5" />
-            {clearing ? 'Clearing...' : 'Clear All'}
+            {getClearButtonText()}
           </button>
         </div>
         
