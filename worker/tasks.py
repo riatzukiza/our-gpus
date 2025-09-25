@@ -117,8 +117,9 @@ def probe_host(self, host_id: int):  # noqa: ARG001
             service = ProbeService()
             probe = loop.run_until_complete(service.probe_host(host))
 
-            # Save probe result
+            # Save probe result and updated host information
             session.add(probe)
+            session.add(host)  # Save the modified host object!
 
             # Update models if successful
             if probe.status == "success":

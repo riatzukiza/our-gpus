@@ -132,6 +132,7 @@ class ProbeService:
             except httpx.TimeoutException:
                 if attempt == self.retries - 1:
                     host.status = "timeout"
+                    host.last_error = "Connection timeout"
                     return Probe(
                         host_id=host.id,
                         status="timeout",
@@ -143,18 +144,21 @@ class ProbeService:
 
             except Exception as e:
                 if attempt == self.retries - 1:
+                    error_msg = str(e)[:500]
                     host.status = "error"
+                    host.last_error = error_msg
                     return Probe(
                         host_id=host.id,
                         status="error",
                         duration_ms=(datetime.utcnow() - start_time).total_seconds() * 1000,
                         raw_payload="",
-                        error=str(e)[:500],
+                        error=error_msg,
                     )
                 await asyncio.sleep(0.5 * (2**attempt))
 
         # If all retries failed without returning
         host.status = "error"
+        host.last_error = "All retries exhausted"
         return Probe(
             host_id=host.id,
             status="error",

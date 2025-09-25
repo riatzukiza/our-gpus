@@ -197,6 +197,9 @@ async def trigger_probe(request: ProbeRequest, session: Session = Depends(get_se
     if total_hosts == 0:
         return {"message": "No hosts found to probe", "task_ids": []}
     
+    # Store start time for progress tracking
+    probe_start_time = datetime.now()
+    
     tasks = []
     
     # Use batch processing for large requests to reduce Redis load
@@ -246,7 +249,7 @@ async def trigger_probe(request: ProbeRequest, session: Session = Depends(get_se
         if filter_desc:
             message += f" ({', '.join(filter_desc)})"
 
-    return {"message": message, "task_ids": tasks}
+    return {"message": message, "task_ids": tasks, "probe_start_time": probe_start_time.isoformat()}
 
 
 @app.get("/api/hosts", response_model=PaginatedHostResponse)
@@ -639,6 +642,74 @@ async def clear_all_hosts(session: Session = Depends(get_session)):
     session.commit()
 
     return {"message": f"Cleared {host_count} hosts and related data"}
+
+
+@app.get("/api/probe-stats")
+async def get_recent_probe_stats(
+    minutes: int = Query(5, ge=1, le=60),
+    session: Session = Depends(get_session)
+):
+    """Get probe statistics for the last N minutes"""
+    from datetime import timedelta
+    
+    cutoff_time = datetime.utcnow() - timedelta(minutes=minutes)
+    
+    # Get recent probe statistics
+    probe_stats = session.exec(
+        select(
+            Probe.status,
+            func.count(Probe.id).label("count"),
+            func.avg(Probe.duration_ms).label("avg_duration")
+        )
+        .where(Probe.created_at >= cutoff_time)
+        .group_by(Probe.status)
+    ).all()
+    
+    # Get total counts
+    total_recent = session.exec(
+        select(func.count(Probe.id))
+        .where(Probe.created_at >= cutoff_time)
+    ).first() or 0
+    
+    # Get total hosts and current status breakdown
+    total_hosts = session.exec(select(func.count(Host.id))).first() or 0
+    
+    host_status_counts = session.exec(
+        select(Host.status, func.count(Host.id).label("count"))
+        .group_by(Host.status)
+    ).all()
+    
+    # Get sample errors for debugging
+    sample_errors = session.exec(
+        select(Probe.error)
+        .where(Probe.created_at >= cutoff_time, Probe.status == "error", Probe.error.is_not(None))
+        .limit(5)
+    ).all()
+    
+    # Format statistics
+    stats = {}
+    for stat in probe_stats:
+        stats[stat.status] = {
+            "count": stat.count,
+            "avg_duration_ms": round(stat.avg_duration, 2) if stat.avg_duration else 0
+        }
+    
+    host_statuses = {}
+    for status_count in host_status_counts:
+        host_statuses[status_count.status] = status_count.count
+    
+    return {
+        "time_window_minutes": minutes,
+        "total_hosts": total_hosts,
+        "probes_completed": total_recent,
+        "success_count": stats.get("success", {}).get("count", 0),
+        "error_count": stats.get("error", {}).get("count", 0),
+        "timeout_count": stats.get("timeout", {}).get("count", 0),
+        "detailed_stats": stats,
+        "host_status_breakdown": host_statuses,
+        "sample_errors": [err for err in sample_errors if err],
+        "last_updated": datetime.utcnow()
+    }
 
 
 @app.get("/metrics")

@@ -31,7 +31,39 @@ export default function Explore() {
   const [clearing, setClearing] = useState(false)
   const [probing, setProbing] = useState(false)
   const [probeMessage, setProbeMessage] = useState('')
+  const [probeStats, setProbeStats] = useState<any>(null)
   const queryClient = useQueryClient()
+
+  const startProbePolling = () => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const statsResponse = await axios.get(`/api/probe-stats?minutes=2`)
+        const stats = statsResponse.data
+        setProbeStats(stats)
+        
+        // Update message with progress
+        const progress = `Probed: ${stats.probes_completed}/${stats.total_hosts} - Success: ${stats.success_count}, Errors: ${stats.error_count}, Timeouts: ${stats.timeout_count}`
+        setProbeMessage(`Probing in progress... ${progress}`)
+        
+        // Check if we should stop polling (no new probes in last minute suggests completion)
+        if (stats.probes_completed > 0 && stats.probes_completed >= stats.total_hosts * 0.95) {
+          clearInterval(pollInterval)
+          setProbeMessage(`Probe batch completed! Success: ${stats.success_count}, Errors: ${stats.error_count}, Timeouts: ${stats.timeout_count}. Refreshing data...`)
+          setTimeout(() => {
+            refetch()
+            setProbing(false)
+            setProbeMessage('')
+            setProbeStats(null)
+          }, 2000)
+        }
+      } catch (error) {
+        console.error('Error polling probe status:', error)
+        clearInterval(pollInterval)
+        setProbeMessage('Error monitoring probe progress. Check logs.')
+        setProbing(false)
+      }
+    }, 3000) // Poll every 3 seconds
+  }
 
   const { data, isLoading, refetch } = useQuery(
     ['hosts', page, pageSize, filters, search],
@@ -148,6 +180,10 @@ export default function Explore() {
       })
       console.log('Probe response:', response.data)
       const baseMessage = response.data.message || `Queued probe tasks`
+      
+      // Start polling for probe progress using time-based approach
+      startProbePolling()
+      
       if (!hostId) {
         // Add context about total hosts when probing all/filtered
         const contextMessage = payload.probe_all 
@@ -155,9 +191,15 @@ export default function Explore() {
           : Object.keys(payload.filter || {}).length > 0 
             ? `(${totalHosts} matching hosts)`
             : `(limited to 100 hosts)`
-        setProbeMessage(`${baseMessage} ${contextMessage}. Refreshing in 5 seconds...`)
+        setProbeMessage(`${baseMessage} ${contextMessage}. Monitoring progress...`)
       } else {
         setProbeMessage(`${baseMessage}. Refreshing in 5 seconds...`)
+        // For single host probes, use the old refresh logic
+        setTimeout(() => {
+          refetch()
+          setProbing(false)
+          setProbeMessage('')
+        }, 5000)
       }
       
       // Refresh data after a delay to see probe results
@@ -290,7 +332,26 @@ export default function Explore() {
       
       {probeMessage && (
         <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 px-4 py-3 rounded-lg">
-          {probeMessage}
+          <div className="flex items-center justify-between">
+            <span>{probeMessage}</span>
+            {probing && probeStats && (
+              <div className="text-sm space-x-4">
+                <span>✅ {probeStats.success_count}</span>
+                <span>❌ {probeStats.error_count}</span>
+                <span>⏱️ {probeStats.timeout_count}</span>
+              </div>
+            )}
+          </div>
+          {probing && probeStats && probeStats.progress_percent !== undefined && (
+            <div className="mt-2">
+              <div className="bg-blue-200 dark:bg-blue-800 rounded-full h-2">
+                <div 
+                  className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${probeStats.progress_percent}%` }}
+                ></div>
+              </div>
+            </div>
+          )}
         </div>
       )}
       
