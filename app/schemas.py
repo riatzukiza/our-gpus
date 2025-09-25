@@ -32,6 +32,7 @@ class ScanResponse(BaseModel):
 class ProbeRequest(BaseModel):
     host_ids: list[int] | None = None
     filter: dict[str, Any] | None = None
+    probe_all: bool = False
 
 
 class HostResponse(BaseModel):

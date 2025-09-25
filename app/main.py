@@ -185,21 +185,68 @@ async def trigger_probe(request: ProbeRequest, session: Session = Depends(get_se
                 )
         if "status" in request.filter:
             query = query.where(Host.status == request.filter["status"])
-    else:
+    elif not getattr(request, 'probe_all', False):
+        # Only apply default limit if probe_all is not explicitly set to True
         query = query.limit(100)  # Default limit
 
     hosts = session.exec(query).all()
 
     # Queue probe tasks
-    from worker.tasks import probe_host
-
+    total_hosts = len(hosts)
+    
+    if total_hosts == 0:
+        return {"message": "No hosts found to probe", "task_ids": []}
+    
     tasks = []
-    for host in hosts:
-        task = probe_host.delay(host.id)
-        tasks.append(task.id)
-        probe_counter.labels(status="queued").inc()
+    
+    # Use batch processing for large requests to reduce Redis load
+    if total_hosts > 100:
+        from worker.tasks import batch_probe
+        host_ids = [host.id for host in hosts]
+        
+        # Split into smaller batches of 100 to avoid overwhelming the worker
+        batch_size = 100
+        
+        for i in range(0, len(host_ids), batch_size):
+            batch = host_ids[i:i + batch_size]
+            task = batch_probe.delay(batch)
+            tasks.append(task.id)
+            # Increment counter for each host in the batch
+            for _ in batch:
+                probe_counter.labels(status="queued").inc()
+        
+        message = f"Queued {total_hosts} probe tasks in {len(tasks)} batches"
+    
+    else:
+        # Use individual tasks for smaller requests
+        from worker.tasks import probe_host
+        
+        for host in hosts:
+            task = probe_host.delay(host.id)
+            tasks.append(task.id)
+            probe_counter.labels(status="queued").inc()
 
-    return {"message": f"Queued {len(tasks)} probe tasks", "task_ids": tasks}
+        message = f"Queued {len(tasks)} probe tasks"
+        
+    # Add descriptive information
+    if getattr(request, 'probe_all', False):
+        message += f" (probing all {total_hosts} hosts)"
+    elif request.filter and len(hosts) < 1000:  # Only show details for reasonable numbers
+        filter_desc = []
+        if request.filter.get("model"):
+            filter_desc.append(f"model: {request.filter['model']}")
+        if request.filter.get("family"):
+            filter_desc.append(f"family: {request.filter['family']}")
+        if request.filter.get("status"):
+            filter_desc.append(f"status: {request.filter['status']}")
+        if request.filter.get("gpu") is not None:
+            gpu_desc = "with GPU" if request.filter["gpu"] else "without GPU"
+            filter_desc.append(gpu_desc)
+        
+        if filter_desc:
+            message += f" ({', '.join(filter_desc)})"
+
+    return {"message": message, "task_ids": tasks}
 
 
 @app.get("/api/hosts", response_model=PaginatedHostResponse)

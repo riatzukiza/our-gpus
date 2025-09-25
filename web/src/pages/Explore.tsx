@@ -107,6 +107,14 @@ export default function Explore() {
   }
 
   const handleProbe = async (hostId?: number) => {
+    // Safety check for large batches
+    if (!hostId && totalHosts > 1000) {
+      const confirmed = window.confirm(
+        `You are about to probe ${totalHosts} hosts. This may take several minutes and use significant system resources. Continue?`
+      )
+      if (!confirmed) return
+    }
+    
     const payload: any = {}
     
     if (hostId) {
@@ -121,6 +129,9 @@ export default function Explore() {
       
       if (Object.keys(activeFilters).length > 0) {
         payload.filter = activeFilters
+      } else {
+        // When no filters are set, explicitly request to probe all hosts
+        payload.probe_all = true
       }
     }
     
@@ -136,7 +147,18 @@ export default function Explore() {
         }
       })
       console.log('Probe response:', response.data)
-      setProbeMessage(`${response.data.message}. Refreshing in 5 seconds...`)
+      const baseMessage = response.data.message || `Queued probe tasks`
+      if (!hostId) {
+        // Add context about total hosts when probing all/filtered
+        const contextMessage = payload.probe_all 
+          ? `(${totalHosts} total hosts)`
+          : Object.keys(payload.filter || {}).length > 0 
+            ? `(${totalHosts} matching hosts)`
+            : `(limited to 100 hosts)`
+        setProbeMessage(`${baseMessage} ${contextMessage}. Refreshing in 5 seconds...`)
+      } else {
+        setProbeMessage(`${baseMessage}. Refreshing in 5 seconds...`)
+      }
       
       // Refresh data after a delay to see probe results
       setTimeout(() => {
@@ -238,9 +260,13 @@ export default function Explore() {
             onClick={() => handleProbe()}
             disabled={probing}
             className={`px-4 py-2 ${probing ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'} text-white rounded-lg transition-colors flex items-center`}
+            title={`Probe ${totalHosts} hosts${Object.values(filters).some(v => v !== null && v !== '') ? ' (filtered)' : ' (all hosts)'}`}
           >
             <RefreshCw className={`w-4 h-4 mr-2 ${probing ? 'animate-spin' : ''}`} />
-            {probing ? 'Probing...' : 'Probe All'}
+            {probing 
+              ? 'Probing...' 
+              : `Probe ${Object.values(filters).some(v => v !== null && v !== '') ? 'Filtered' : 'All'} (${totalHosts})`
+            }
           </button>
           
           <button
