@@ -491,14 +491,14 @@ export default function Explore() {
         <div className="min-w-[1200px]">
           <table className="w-full divide-y divide-gray-200 dark:divide-gray-700 table-fixed">
             <colgroup>
-              <col className="w-36" /> {/* Host */}
-              <col className="w-24" /> {/* Status */}
-              <col className="w-20" /> {/* Version */}
-              <col className="w-24" /> {/* Latency */}
-              <col className="w-80" /> {/* Models */}
-              <col className="w-28" /> {/* System */}
-              <col className="w-24" /> {/* Last Seen */}
-              <col className="w-20" /> {/* Actions */}
+              <col className="w-36" />
+              <col className="w-24" />
+              <col className="w-20" />
+              <col className="w-24" />
+              <col className="w-80" />
+              <col className="w-28" />
+              <col className="w-24" />
+              <col className="w-20" />
             </colgroup>
             <thead className="bg-gray-50 dark:bg-gray-700">
               <tr>
