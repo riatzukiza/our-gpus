@@ -606,8 +606,6 @@ async def stream_prompt(
             stream_task = asyncio.create_task(stream_from_ollama())
 
             # Stream with keep-alive pings every 15 seconds
-            last_ping = asyncio.get_event_loop().time()
-
             while True:
                 try:
                     # Wait for chunk with timeout for keep-alive

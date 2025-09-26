@@ -176,9 +176,10 @@ export default function Explore() {
       setPage(1)
     } catch (error) {
       console.error('Failed to clear hosts:', error)
-      if (error.response) {
-        console.error('Error response:', error.response.data)
-        console.error('Error status:', error.response.status)
+      const axiosError = error as any
+      if (axiosError.response) {
+        console.error('Error response:', axiosError.response.data)
+        console.error('Error status:', axiosError.response.status)
       }
       alert('Failed to clear hosts. Please try again.')
     } finally {
