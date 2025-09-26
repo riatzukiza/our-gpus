@@ -39,7 +39,13 @@ app.add_middleware(
     allow_origins=settings.get_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=[
+        "*",
+        "CF-Access-JWT-Assertion",
+        "CF-Access-Client-Id",
+        "CF-Access-Client-Secret",
+        "X-Requested-With",
+    ],
 )
 
 
@@ -564,6 +570,22 @@ async def run_prompt(host_id: int, request: PromptRequest, session: Session = De
         return PromptResponse(success=False, error=result.get("error", "Unknown error"))
 
 
+@app.options("/api/hosts/{host_id}/prompt/stream")
+async def options_stream_prompt(_host_id: int):
+    """Handle preflight OPTIONS requests for streaming endpoint"""
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "CF-Access-JWT-Assertion, CF-Access-Client-Id, CF-Access-Client-Secret, Content-Type, Authorization, X-Requested-With",
+            "Access-Control-Max-Age": "86400",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Expose-Headers": "*",
+        },
+    )
+
+
 @app.post("/api/hosts/{host_id}/prompt/stream")
 async def stream_prompt(
     host_id: int, request: PromptRequest, session: Session = Depends(get_session)
@@ -639,9 +661,15 @@ async def stream_prompt(
         generate(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # Disable Nginx buffering
+            "X-Content-Type-Options": "nosniff",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "CF-Access-JWT-Assertion, CF-Access-Client-Id, CF-Access-Client-Secret, Content-Type, Authorization",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Expose-Headers": "*",
         },
     )
 
