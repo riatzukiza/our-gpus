@@ -38,6 +38,17 @@ def test_engine():
 def session(test_engine):
     """Create a test database session"""
     with Session(test_engine) as session:
+        # Clean up all data before each test
+        from app.db import Host, HostModel, Model, Probe, Scan  # noqa: F401
+
+        # Delete all data in correct order to respect foreign keys
+        session.exec(Probe.__table__.delete())
+        session.exec(HostModel.__table__.delete())
+        session.exec(Scan.__table__.delete())
+        session.exec(Host.__table__.delete())
+        session.exec(Model.__table__.delete())
+        session.commit()
+
         yield session
 
 

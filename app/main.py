@@ -7,6 +7,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFi
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from prometheus_client import Counter, Histogram, generate_latest
+from pydantic import BaseModel
 from sqlmodel import Session, func, select
 
 from app.config import settings
@@ -24,7 +25,6 @@ from app.schemas import (
     PromptResponse,
     ScanResponse,
 )
-from pydantic import BaseModel
 
 app = FastAPI(title="our gpu API", version="1.0.0")
 
@@ -94,7 +94,7 @@ async def start_ingest(
     # Original logic for JSON/JSONL files
     if not file:
         raise HTTPException(400, "No file provided")
-        
+
     field_mapping = json.loads(field_map) if field_map else {}
     scan = Scan(
         source_file=file.filename if file else source,
@@ -109,17 +109,17 @@ async def start_ingest(
     try:
         file_content = await file.read()
         ingest_service = IngestService(session)
-        
+
         # Set scan to processing
         scan.status = "processing"
         scan.started_at = datetime.now()
         session.commit()
-        
+
         # Process the file
         records = list(ingest_service.parse_stream(file_content, field_mapping))
         scan.total_rows = len(records)
         session.commit()
-        
+
         success, failed = ingest_service.process_batch(records, scan.id or 0)
 
         # Update scan status
@@ -130,12 +130,12 @@ async def start_ingest(
         session.commit()
 
         return IngestResponse(scan_id=scan.id, status="completed", task_id=f"sync-{scan.id}")
-        
+
     except Exception as e:
         scan.status = "failed"
         scan.error_message = str(e)
         session.commit()
-        raise HTTPException(500, f"Processing failed: {str(e)}")
+        raise HTTPException(500, f"Processing failed: {str(e)}") from None
 
 
 @app.get("/api/scans/{scan_id}", response_model=ScanResponse)
@@ -186,7 +186,7 @@ async def trigger_probe(request: ProbeRequest, session: Session = Depends(get_se
                 )
         if "status" in request.filter:
             query = query.where(Host.status == request.filter["status"])
-    elif not getattr(request, 'probe_all', False):
+    elif not getattr(request, "probe_all", False):
         # Only apply default limit if probe_all is not explicitly set to True
         query = query.limit(100)  # Default limit
 
@@ -194,46 +194,47 @@ async def trigger_probe(request: ProbeRequest, session: Session = Depends(get_se
 
     # Queue probe tasks
     total_hosts = len(hosts)
-    
+
     if total_hosts == 0:
         return {"message": "No hosts found to probe", "task_ids": []}
-    
+
     # Store start time for progress tracking
     probe_start_time = datetime.now()
-    
+
     tasks = []
-    
+
     # Use batch processing for large requests to reduce Redis load
     if total_hosts > 100:
         from worker.tasks import batch_probe
+
         host_ids = [host.id for host in hosts]
-        
+
         # Split into smaller batches of 100 to avoid overwhelming the worker
         batch_size = 100
-        
+
         for i in range(0, len(host_ids), batch_size):
-            batch = host_ids[i:i + batch_size]
+            batch = host_ids[i : i + batch_size]
             task = batch_probe.delay(batch)
             tasks.append(task.id)
             # Increment counter for each host in the batch
             for _ in batch:
                 probe_counter.labels(status="queued").inc()
-        
+
         message = f"Queued {total_hosts} probe tasks in {len(tasks)} batches"
-    
+
     else:
         # Use individual tasks for smaller requests
         from worker.tasks import probe_host
-        
+
         for host in hosts:
             task = probe_host.delay(host.id)
             tasks.append(task.id)
             probe_counter.labels(status="queued").inc()
 
         message = f"Queued {len(tasks)} probe tasks"
-        
+
     # Add descriptive information
-    if getattr(request, 'probe_all', False):
+    if getattr(request, "probe_all", False):
         message += f" (probing all {total_hosts} hosts)"
     elif request.filter and len(hosts) < 1000:  # Only show details for reasonable numbers
         filter_desc = []
@@ -246,7 +247,7 @@ async def trigger_probe(request: ProbeRequest, session: Session = Depends(get_se
         if request.filter.get("gpu") is not None:
             gpu_desc = "with GPU" if request.filter["gpu"] else "without GPU"
             filter_desc.append(gpu_desc)
-        
+
         if filter_desc:
             message += f" ({', '.join(filter_desc)})"
 
@@ -271,7 +272,7 @@ async def list_hosts(
     needs_model_join = bool(model or family)
     if needs_model_join:
         base_query = base_query.join(HostModel).join(Model)
-    
+
     if model:
         base_query = base_query.where(Model.name.contains(model))
     if family:
@@ -418,12 +419,9 @@ async def list_models(session: Session = Depends(get_session)):
 async def list_model_names(session: Session = Depends(get_session)):
     """Get unique model names for filter dropdown"""
     model_names = session.exec(
-        select(Model.name)
-        .join(HostModel)
-        .group_by(Model.name)
-        .order_by(Model.name)
+        select(Model.name).join(HostModel).group_by(Model.name).order_by(Model.name)
     ).all()
-    
+
     return {"models": model_names}
 
 
@@ -431,12 +429,9 @@ async def list_model_names(session: Session = Depends(get_session)):
 async def list_model_families(session: Session = Depends(get_session)):
     """Get unique model families for filter dropdown"""
     families = session.exec(
-        select(Model.family)
-        .join(HostModel)
-        .group_by(Model.family)
-        .order_by(Model.family)
+        select(Model.family).join(HostModel).group_by(Model.family).order_by(Model.family)
     ).all()
-    
+
     return {"families": families}
 
 
@@ -586,21 +581,58 @@ async def stream_prompt(
     probe_service = ProbeService()
 
     async def generate():
-        """Generate SSE events"""
+        """Generate SSE events with keep-alive pings"""
         try:
-            async for chunk in probe_service.stream_prompt(
-                host_ip=host.ip, host_port=host.port, model=request.model, prompt=request.prompt
-            ):
-                # Format as Server-Sent Event
-                if chunk["type"] == "error":
-                    yield f"data: {json.dumps({'error': chunk['content']})}\n\n"
-                else:
-                    yield f"data: {json.dumps(chunk)}\n\n"
+            import asyncio
 
-                # If done, send final event
-                if chunk.get("done", False):
-                    yield f"data: {json.dumps({'done': True})}\n\n"
-                    break
+            # Create a queue for chunks
+            chunk_queue = asyncio.Queue()
+
+            async def stream_from_ollama():
+                """Stream from Ollama and put chunks in queue"""
+                try:
+                    async for chunk in probe_service.stream_prompt(
+                        host_ip=host.ip,
+                        host_port=host.port,
+                        model=request.model,
+                        prompt=request.prompt,
+                    ):
+                        await chunk_queue.put(chunk)
+                    await chunk_queue.put(None)  # Sentinel to indicate done
+                except Exception as e:
+                    await chunk_queue.put({"type": "error", "content": str(e)})
+
+            # Start the Ollama streaming task
+            stream_task = asyncio.create_task(stream_from_ollama())
+
+            # Stream with keep-alive pings every 15 seconds
+            last_ping = asyncio.get_event_loop().time()
+
+            while True:
+                try:
+                    # Wait for chunk with timeout for keep-alive
+                    chunk = await asyncio.wait_for(chunk_queue.get(), timeout=15.0)
+
+                    if chunk is None:  # Stream completed
+                        yield f"data: {json.dumps({'done': True})}\n\n"
+                        break
+
+                    # Format as Server-Sent Event
+                    if chunk["type"] == "error":
+                        yield f"data: {json.dumps({'error': chunk['content']})}\n\n"
+                    else:
+                        yield f"data: {json.dumps(chunk)}\n\n"
+
+                    # If done, send final event
+                    if chunk.get("done", False):
+                        yield f"data: {json.dumps({'done': True})}\n\n"
+                        break
+
+                except TimeoutError:
+                    # Send keep-alive ping
+                    yield f"data: {json.dumps({'ping': True})}\n\n"
+
+            await stream_task
 
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -690,12 +722,12 @@ async def clear_filtered_hosts(
     """Clear hosts that match the specified filters"""
     # Build query to find hosts to delete
     query = select(Host)
-    
+
     # Apply the same filters as the list_hosts endpoint
     needs_model_join = bool(request.model or request.family)
     if needs_model_join:
         query = query.join(HostModel).join(Model)
-    
+
     if request.model:
         query = query.where(Model.name.contains(request.model))
     if request.family:
@@ -709,14 +741,14 @@ async def clear_filtered_hosts(
             )
     if request.status:
         query = query.where(Host.status == request.status)
-    
+
     # Get hosts to delete
     hosts_to_delete = session.exec(query).all()
     host_ids_to_delete = [host.id for host in hosts_to_delete]
-    
+
     if not host_ids_to_delete:
         return {"message": "No hosts match the specified filters", "cleared_count": 0}
-    
+
     # Delete related records first
     if host_ids_to_delete:
         # Delete HostModel records
@@ -725,79 +757,78 @@ async def clear_filtered_hosts(
         ).all()
         for hm in host_models:
             session.delete(hm)
-        
+
         # Delete Probe records
-        probes = session.exec(
-            select(Probe).where(Probe.host_id.in_(host_ids_to_delete))
-        ).all()
+        probes = session.exec(select(Probe).where(Probe.host_id.in_(host_ids_to_delete))).all()
         for probe in probes:
             session.delete(probe)
-    
+
     # Delete the hosts
     deleted_count = 0
     for host in hosts_to_delete:
         session.delete(host)
         deleted_count += 1
-    
+
     session.commit()
-    
-    return {"message": f"Cleared {deleted_count} hosts matching filters", "cleared_count": deleted_count}
+
+    return {
+        "message": f"Cleared {deleted_count} hosts matching filters",
+        "cleared_count": deleted_count,
+    }
 
 
 @app.get("/api/probe-stats")
 async def get_recent_probe_stats(
-    minutes: int = Query(5, ge=1, le=60),
-    session: Session = Depends(get_session)
+    minutes: int = Query(5, ge=1, le=60), session: Session = Depends(get_session)
 ):
     """Get probe statistics for the last N minutes"""
     from datetime import timedelta
-    
+
     cutoff_time = datetime.utcnow() - timedelta(minutes=minutes)
-    
+
     # Get recent probe statistics
     probe_stats = session.exec(
         select(
             Probe.status,
             func.count(Probe.id).label("count"),
-            func.avg(Probe.duration_ms).label("avg_duration")
+            func.avg(Probe.duration_ms).label("avg_duration"),
         )
         .where(Probe.created_at >= cutoff_time)
         .group_by(Probe.status)
     ).all()
-    
+
     # Get total counts
-    total_recent = session.exec(
-        select(func.count(Probe.id))
-        .where(Probe.created_at >= cutoff_time)
-    ).first() or 0
-    
+    total_recent = (
+        session.exec(select(func.count(Probe.id)).where(Probe.created_at >= cutoff_time)).first()
+        or 0
+    )
+
     # Get total hosts and current status breakdown
     total_hosts = session.exec(select(func.count(Host.id))).first() or 0
-    
+
     host_status_counts = session.exec(
-        select(Host.status, func.count(Host.id).label("count"))
-        .group_by(Host.status)
+        select(Host.status, func.count(Host.id).label("count")).group_by(Host.status)
     ).all()
-    
+
     # Get sample errors for debugging
     sample_errors = session.exec(
         select(Probe.error)
         .where(Probe.created_at >= cutoff_time, Probe.status == "error", Probe.error.is_not(None))
         .limit(5)
     ).all()
-    
+
     # Format statistics
     stats = {}
     for stat in probe_stats:
         stats[stat.status] = {
             "count": stat.count,
-            "avg_duration_ms": round(stat.avg_duration, 2) if stat.avg_duration else 0
+            "avg_duration_ms": round(stat.avg_duration, 2) if stat.avg_duration else 0,
         }
-    
+
     host_statuses = {}
     for status_count in host_status_counts:
         host_statuses[status_count.status] = status_count.count
-    
+
     return {
         "time_window_minutes": minutes,
         "total_hosts": total_hosts,
@@ -808,7 +839,7 @@ async def get_recent_probe_stats(
         "detailed_stats": stats,
         "host_status_breakdown": host_statuses,
         "sample_errors": [err for err in sample_errors if err],
-        "last_updated": datetime.utcnow()
+        "last_updated": datetime.utcnow(),
     }
 
 

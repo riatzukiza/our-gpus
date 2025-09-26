@@ -16,14 +16,19 @@ def test_ingest_endpoint(client, session):  # noqa: ARG001
     with patch("worker.tasks.process_ingest") as mock_task:
         mock_task.delay.return_value.id = "task-123"
 
+        # Create a test file
+        test_content = b'{"ip": "1.2.3.4", "port": 11434}\n{"ip": "5.6.7.8", "port": 11434}'
+
         response = client.post(
-            "/api/ingest", json={"source": "test.json", "field_map": {"ip": "ip", "port": "port"}}
+            "/api/ingest",
+            files={"file": ("test.json", test_content, "application/json")},
+            data={"source": "upload", "field_map": '{"ip": "ip", "port": "port"}'},
         )
 
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "queued"
-        assert "task_id" in data  # Just check that task_id exists, not the specific value
+        assert data["status"] == "completed"  # Since we're processing synchronously in test
+        assert "task_id" in data
 
 
 def test_list_hosts(client, session):
@@ -71,14 +76,20 @@ def test_get_host_not_found(client, session):  # noqa: ARG001
     assert response.status_code == 404
 
 
-def test_trigger_probe(client):
-    with (
-        patch("worker.tasks.probe_host") as mock_task,
-        patch("app.main.get_session") as mock_session,
-    ):
-        mock_hosts = [Host(id=1, ip="1.2.3.4", port=11434)]
+def test_trigger_probe(client, session):
+    # Add a test host to the database
+    test_host = Host(
+        id=1,
+        ip="1.2.3.4",
+        port=11434,
+        status="unknown",
+        last_seen=datetime.utcnow(),
+        first_seen=datetime.utcnow(),
+    )
+    session.add(test_host)
+    session.commit()
 
-        mock_session.return_value.exec.return_value.all.return_value = mock_hosts
+    with patch("worker.tasks.probe_host") as mock_task:
         mock_task.delay.return_value.id = "task-456"
 
         response = client.post("/api/probe", json={"host_ids": [1]})

@@ -282,12 +282,12 @@ class ProbeService:
 
         try:
             async with httpx.AsyncClient(
-                verify=False, timeout=httpx.Timeout(60.0, connect=10.0)
+                verify=False, timeout=httpx.Timeout(30.0, connect=10.0)
             ) as client:
                 payload = {"model": model, "prompt": prompt, "stream": True}
 
                 async with client.stream(
-                    "POST", f"{base_url}/api/generate", json=payload, timeout=60.0
+                    "POST", f"{base_url}/api/generate", json=payload, timeout=30.0
                 ) as response:
                     if response.status_code == 200:
                         async for line in response.aiter_lines():

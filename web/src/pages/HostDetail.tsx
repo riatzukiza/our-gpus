@@ -79,6 +79,11 @@ export default function HostDetail() {
                     return
                   }
                   
+                  // Skip keep-alive pings
+                  if (data.ping) {
+                    continue
+                  }
+                  
                   if (data.content) {
                     accumulatedResponse += data.content
                     setStreamingResponse(accumulatedResponse)
