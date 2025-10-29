@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # Test Database
+  test-db:
+    image: sqlite:latest
+    volumes:
+      - ./test-data:/data
+
+  # API Gateway Tests
+  api-gateway-test:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile.test
+    environment:
+      - NODE_ENV=test
+      - DATABASE_URL=sqlite:///tmp/test.db
+    volumes:
+      - ./services/api-gateway:/app
+      - /app/node_modules
+    command: npm test
+    depends_on:
+      - test-db
+
+  # JSON Processor Tests
+  json-processor-test:
+    build:
+      context: ./services/json-processor
+      dockerfile: Dockerfile.test
+    environment:
+      - NODE_ENV=test
+    volumes:
+      - ./services/json-processor:/app
+      - /app/node_modules
+    command: npm test
+
+  # Ollama Scanner Tests
+  ollama-scanner-test:
+    build:
+      context: ./services/ollama-scanner
+      dockerfile: Dockerfile.test
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - ./services/ollama-scanner:/app
+    command: python -m pytest tests/
+
+  # Integration Tests
+  integration-test:
+    build:
+      context: ./tests/integration
+      dockerfile: Dockerfile
+    environment:
+      - API_GATEWAY_URL=http://api-gateway-test:4000
+      - JSON_PROCESSOR_URL=http://json-processor-test:4001
+      - OLLAMA_SCANNER_URL=http://ollama-scanner-test:4002
+    volumes:
+      - ./tests:/tests
+    command: npm test
+    depends_on:
+      - api-gateway-test
+      - json-processor-test
+      - ollama-scanner-test
+
+  # E2E Tests
+  e2e-test:
+    build:
+      context: ./tests/e2e
+      dockerfile: Dockerfile
+    environment:
+      - FRONTEND_URL=http://frontend:3000
+      - API_URL=http://api-gateway:4000
+    volumes:
+      - ./tests/e2e:/tests
+    command: npm run test:e2e
+    depends_on:
+      - frontend
+      - api-gateway
+      - json-processor
+      - ollama-scanner
+
+volumes:
+  test_data:

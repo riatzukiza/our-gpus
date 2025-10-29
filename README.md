@@ -1,4 +1,4 @@
-# OurGPU Claude
+# Our GPUs
 
 A production-ready platform for discovering, cataloging, and monitoring Ollama instances at scale. Successfully tracks 3,400+ hosts with their models, GPU capabilities, and availability status.
 
@@ -18,7 +18,7 @@ A production-ready platform for discovering, cataloging, and monitoring Ollama i
 
 1. **Clone and setup**:
 ```bash
-cd our-opus-v1
+cd our-gpus-v1
 cp .env.example .env
 ```
 

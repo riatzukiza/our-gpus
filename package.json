@@ -1,0 +1,32 @@
+{
+  "name": "ollama-discovery-platform",
+  "version": "1.0.0",
+  "description": "Comprehensive web-based platform for discovering and cataloging Ollama hosts",
+  "scripts": {
+    "dev": "docker-compose up --build",
+    "dev:tools": "docker-compose --profile tools up --build",
+    "prod": "docker-compose -f docker-compose.prod.yml up --build",
+    "test": "docker-compose -f docker-compose.test.yml up --build --abort-on-container-exit",
+    "setup": "npm run setup:services && npm run setup:db",
+    "setup:services": "cd services && find . -name 'package.json' -execdir npm install \\;",
+    "setup:db": "mkdir -p data uploads && touch data/ollama-discovery.db",
+    "lint": "npm run lint:api && npm run lint:frontend && npm run lint:processor && npm run lint:worker",
+    "lint:api": "cd services/api-gateway && npm run lint",
+    "lint:frontend": "cd services/frontend && npm run lint",
+    "lint:processor": "cd services/json-processor && npm run lint",
+    "lint:worker": "cd services/background-worker && npm run lint",
+    "typecheck": "npm run typecheck:api && npm run typecheck:frontend && npm run typecheck:processor && npm run typecheck:worker",
+    "typecheck:api": "cd services/api-gateway && npm run type-check",
+    "typecheck:frontend": "cd services/frontend && npm run type-check",
+    "typecheck:processor": "cd services/json-processor && npm run type-check",
+    "typecheck:worker": "cd services/background-worker && npm run type-check",
+    "clean": "docker-compose down -v && docker system prune -f"
+  },
+  "keywords": ["ollama", "network-scanning", "discovery", "gpu-detection", "microservices"],
+  "author": "Ollama Discovery Platform",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0"
+  }
+}
