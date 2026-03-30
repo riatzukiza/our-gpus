@@ -96,6 +96,34 @@ class Probe(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class TaskJob(SQLModel, table=True):
+    __tablename__ = "task_jobs"
+
+    id: int | None = Field(default=None, primary_key=True)
+    task_id: str = Field(sa_column=Column(Text, unique=True, index=True))
+    kind: str = Field(index=True)
+    label: str | None = None
+    status: str = Field(default="queued", index=True)
+    total_items: int = 0
+    processed_items: int = 0
+    success_items: int = 0
+    failed_items: int = 0
+    message: str | None = None
+    error: str | None = None
+    payload_json: str = Field(default="{}", sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @property
+    def payload(self) -> dict:
+        return json.loads(self.payload_json) if self.payload_json else {}
+
+    @payload.setter
+    def payload(self, value: dict):
+        self.payload_json = json.dumps(value)
+
+
 engine = None
 SessionLocal = None
 

@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
 
+from app.config import settings
 from app.db import get_session
 from app.main import app
 
@@ -20,7 +21,7 @@ def test_engine():
         os.unlink("./test_ci.db")
 
     # Import all models to ensure they're registered
-    from app.db import Host, HostModel, Model, Probe, Scan  # noqa: F401
+    from app.db import Host, HostModel, Model, Probe, Scan, TaskJob  # noqa: F401
 
     engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False}, echo=False)
 
@@ -39,10 +40,11 @@ def session(test_engine):
     """Create a test database session"""
     with Session(test_engine) as session:
         # Clean up all data before each test
-        from app.db import Host, HostModel, Model, Probe, Scan  # noqa: F401
+        from app.db import Host, HostModel, Model, Probe, Scan, TaskJob  # noqa: F401
 
         # Delete all data in correct order to respect foreign keys
         session.exec(Probe.__table__.delete())
+        session.exec(TaskJob.__table__.delete())
         session.exec(HostModel.__table__.delete())
         session.exec(Scan.__table__.delete())
         session.exec(Host.__table__.delete())
@@ -71,3 +73,20 @@ def client(test_engine, session):  # noqa: ARG001
 
     # Clear overrides after test
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(scope="function")
+def admin_headers():
+    original_admin_api_key = settings.admin_api_key
+    original_our_gpus_api_key = settings.our_gpus_api_key
+    original_proxx_api_key = settings.proxx_api_key
+
+    settings.admin_api_key = "test-admin-key"
+    settings.our_gpus_api_key = ""
+    settings.proxx_api_key = ""
+
+    yield {"X-API-Key": "test-admin-key"}
+
+    settings.admin_api_key = original_admin_api_key
+    settings.our_gpus_api_key = original_our_gpus_api_key
+    settings.proxx_api_key = original_proxx_api_key

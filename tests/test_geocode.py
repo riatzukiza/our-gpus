@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -27,17 +27,16 @@ def test_should_not_geocode_private_host(geo_service):
 async def test_geocode_host_success(geo_service):
     host = Host(ip="8.8.8.8", port=11434, status="online")
 
-    with patch("httpx.AsyncClient") as mock_client:
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "success": True,
-            "country": "United States",
-            "city": "Mountain View",
-            "latitude": 37.4056,
-            "longitude": -122.0775,
-        }
-        mock_response.raise_for_status.return_value = None
-        mock_client.return_value.__aenter__.return_value.get = AsyncMock(return_value=mock_response)
+    with patch.object(geo_service, "_get_geoip") as mock_get_geoip:
+        mock_result = MagicMock()
+        mock_result.is_private = False
+        mock_result.country_name = "United States"
+        mock_result.city = MagicMock(
+            name="Mountain View",
+            latitude=37.4056,
+            longitude=-122.0775,
+        )
+        mock_get_geoip.return_value.lookup.return_value = mock_result
 
         result = await geo_service.geocode_host(host)
 

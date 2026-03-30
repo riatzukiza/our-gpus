@@ -98,11 +98,14 @@ Key environment variables in `.env`:
 - `PROBE_TIMEOUT_SECS`: Timeout for each probe (default: 5)
 - `PROBE_CONCURRENCY`: Max concurrent probes (default: 200)
 - `PROBE_BATCH_SIZE`: Hosts queued per Celery batch task (default: 100)
-- `GEOCODE_TIMEOUT_SECS`: Timeout for each IP geocode lookup (default: 5)
-- `GEOCODE_RETRIES`: Retries for background IP geocode lookups (default: 2)
-- `GEOCODE_PROVIDER_URL`: IP geolocation API base URL (default: `https://ipwho.is`)
+- `GEOCODE_TIMEOUT_SECS`: Timeout for local GeoIP data bootstrap/download (default: 5)
+- `GEOCODE_RETRIES`: Retries for local GeoIP bootstrap/lookups (default: 2)
+- `GEOCODE_DATA_PATH`: Local city database path (default: `/app/data/geoip2fast-city.dat.gz`)
+- `GEOCODE_DATA_URL`: Bootstrap URL for the local city database when the file is missing
 - `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`: Postgres runtime settings
 - `API_DATABASE_URL`, `WORKER_DATABASE_URL`: Explicit Postgres URLs for host-networked API and bridged worker
+- `ADMIN_API_KEY`: Admin-panel/API operator key. If unset, the app will also accept `OUR_GPUS_API_KEY` or `PROXX_API_KEY`.
+- `OUR_GPUS_API_KEY`, `PROXX_API_KEY`: Optional shared federation/admin keys. Reusing the proxx key is supported.
 - `UPLOAD_MAX_MB`: Max upload size (default: 4096)
 - `BATCH_SIZE`: Processing batch size (default: 1000)
 

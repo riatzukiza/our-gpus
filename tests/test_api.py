@@ -76,7 +76,7 @@ def test_get_host_not_found(client, session):  # noqa: ARG001
     assert response.status_code == 404
 
 
-def test_trigger_probe(client, session):
+def test_trigger_probe(client, session, admin_headers):
     # Add a test host to the database
     test_host = Host(
         id=1,
@@ -92,18 +92,21 @@ def test_trigger_probe(client, session):
     with patch("worker.tasks.queue_host_probes") as mock_queue:
         mock_queue.return_value = ["task-456"]
 
-        response = client.post("/api/probe", json={"host_ids": [1]})
+        response = client.post("/api/probe", json={"host_ids": [1]}, headers=admin_headers)
 
         assert response.status_code == 200
         data = response.json()
         assert "Queued 1 probe task" in data["message"]
 
 
-def test_trigger_discovered_probe_backlog(client):
+def test_trigger_discovered_probe_backlog(client, admin_headers):
     with patch("worker.tasks.queue_discovered_hosts") as mock_task:
         mock_task.delay.return_value.id = "task-789"
 
-        response = client.post("/api/probe/discovered?limit=50&batch_size=25")
+        response = client.post(
+            "/api/probe/discovered?limit=50&batch_size=25",
+            headers=admin_headers,
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -112,12 +115,13 @@ def test_trigger_discovered_probe_backlog(client):
         assert data["batch_size"] == 25
 
 
-def test_trigger_geocode_backlog(client):
+def test_trigger_geocode_backlog(client, admin_headers):
     with patch("worker.tasks.queue_ungeocoded_hosts") as mock_task:
         mock_task.delay.return_value.id = "task-999"
 
         response = client.post(
-            "/api/geocode/backlog?limit=20&batch_size=10&include_discovered=true"
+            "/api/geocode/backlog?limit=20&batch_size=10&include_discovered=true",
+            headers=admin_headers,
         )
 
         assert response.status_code == 200
@@ -126,6 +130,13 @@ def test_trigger_geocode_backlog(client):
         assert data["limit"] == 20
         assert data["batch_size"] == 10
         assert data["include_discovered"] is True
+
+
+def test_admin_session_accepts_key(client, admin_headers):
+    response = client.get("/api/admin/session", headers=admin_headers)
+
+    assert response.status_code == 200
+    assert response.json()["authorized"] is True
 
 
 def test_export_csv(client):

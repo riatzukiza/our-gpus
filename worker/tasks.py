@@ -8,7 +8,7 @@ from sqlalchemy import or_
 from sqlmodel import Session, create_engine, select
 
 from app.config import settings
-from app.db import Host, HostModel, Model, Scan
+from app.db import Host, HostModel, Model, Scan, TaskJob
 from app.geocode import GeoService
 from app.ingest import IngestService
 from app.probe import ProbeService
@@ -24,6 +24,142 @@ engine = create_engine(
 )
 
 
+def _upsert_task_job(
+    task_id: str,
+    *,
+    kind: str,
+    label: str | None = None,
+    status: str | None = None,
+    total_items: int | None = None,
+    processed_items: int | None = None,
+    success_items: int | None = None,
+    failed_items: int | None = None,
+    message: str | None = None,
+    error: str | None = None,
+    payload: dict | None = None,
+    started: bool = False,
+    finished: bool = False,
+) -> None:
+    with Session(engine) as session:
+        job = session.exec(select(TaskJob).where(TaskJob.task_id == task_id)).first()
+        if not job:
+            job = TaskJob(task_id=task_id, kind=kind, label=label)
+
+        if label is not None:
+            job.label = label
+        if status is not None:
+            job.status = status
+        if total_items is not None:
+            job.total_items = total_items
+        if processed_items is not None:
+            job.processed_items = processed_items
+        if success_items is not None:
+            job.success_items = success_items
+        if failed_items is not None:
+            job.failed_items = failed_items
+        if message is not None:
+            job.message = message
+        if error is not None:
+            job.error = error
+        if payload is not None:
+            job.payload = payload
+        if started and job.started_at is None:
+            job.started_at = datetime.utcnow()
+        if finished:
+            job.finished_at = datetime.utcnow()
+
+        session.add(job)
+        session.commit()
+
+
+def register_task_job(
+    task_id: str,
+    *,
+    kind: str,
+    label: str,
+    total_items: int = 0,
+    payload: dict | None = None,
+) -> None:
+    _upsert_task_job(
+        task_id,
+        kind=kind,
+        label=label,
+        status="queued",
+        total_items=total_items,
+        payload=payload or {},
+    )
+
+
+def _mark_task_started(task_id: str, *, kind: str, label: str, total_items: int = 0) -> None:
+    _upsert_task_job(
+        task_id,
+        kind=kind,
+        label=label,
+        status="started",
+        total_items=total_items,
+        message="Task started",
+        started=True,
+    )
+
+
+def _mark_task_progress(
+    task_id: str,
+    *,
+    kind: str,
+    label: str,
+    total_items: int,
+    processed_items: int,
+    success_items: int,
+    failed_items: int,
+    payload: dict | None = None,
+    message: str | None = None,
+) -> None:
+    _upsert_task_job(
+        task_id,
+        kind=kind,
+        label=label,
+        status="running",
+        total_items=total_items,
+        processed_items=processed_items,
+        success_items=success_items,
+        failed_items=failed_items,
+        payload=payload,
+        message=message,
+        started=True,
+    )
+
+
+def _mark_task_finished(
+    task_id: str,
+    *,
+    kind: str,
+    label: str,
+    status: str,
+    total_items: int,
+    processed_items: int,
+    success_items: int,
+    failed_items: int,
+    payload: dict | None = None,
+    message: str | None = None,
+    error: str | None = None,
+) -> None:
+    _upsert_task_job(
+        task_id,
+        kind=kind,
+        label=label,
+        status=status,
+        total_items=total_items,
+        processed_items=processed_items,
+        success_items=success_items,
+        failed_items=failed_items,
+        payload=payload,
+        message=message,
+        error=error,
+        started=True,
+        finished=True,
+    )
+
+
 def queue_host_probes(host_ids: list[int], batch_size: int | None = None) -> list[str]:
     """Queue probe work in bounded batches."""
     unique_host_ids = list(dict.fromkeys(host_id for host_id in host_ids if host_id))
@@ -32,11 +168,27 @@ def queue_host_probes(host_ids: list[int], batch_size: int | None = None) -> lis
 
     effective_batch_size = batch_size or settings.probe_batch_size
     if len(unique_host_ids) == 1:
-        return [probe_host.delay(unique_host_ids[0]).id]
+        task = probe_host.delay(unique_host_ids[0])
+        register_task_job(
+            task.id,
+            kind="probe_host",
+            label=f"Probe host {unique_host_ids[0]}",
+            total_items=1,
+            payload={"host_ids": unique_host_ids},
+        )
+        return [task.id]
 
     task_ids = []
     for index in range(0, len(unique_host_ids), effective_batch_size):
-        task = batch_probe.delay(unique_host_ids[index : index + effective_batch_size])
+        batch = unique_host_ids[index : index + effective_batch_size]
+        task = batch_probe.delay(batch)
+        register_task_job(
+            task.id,
+            kind="probe_batch",
+            label=f"Probe batch {index // effective_batch_size + 1}",
+            total_items=len(batch),
+            payload={"host_ids": batch},
+        )
         task_ids.append(task.id)
     return task_ids
 
@@ -117,9 +269,25 @@ def _probe_single_host(
 @celery_app.task(bind=True, name="worker.tasks.process_ingest")
 def process_ingest(self, scan_id: int, file_data: bytes = None):  # noqa: ARG001
     """Process data ingestion job"""
+    task_id = self.request.id
+    if task_id:
+        _mark_task_started(task_id, kind="process_ingest", label=f"Ingest scan {scan_id}")
+
     with Session(engine) as session:
         scan = session.get(Scan, scan_id)
         if not scan:
+            if task_id:
+                _mark_task_finished(
+                    task_id,
+                    kind="process_ingest",
+                    label=f"Ingest scan {scan_id}",
+                    status="failure",
+                    total_items=0,
+                    processed_items=0,
+                    success_items=0,
+                    failed_items=0,
+                    error="Scan not found",
+                )
             return {"error": "Scan not found"}
 
         try:
@@ -164,6 +332,17 @@ def process_ingest(self, scan_id: int, file_data: bytes = None):  # noqa: ARG001
                     current_task.update_state(
                         state="PROGRESS", meta={"current": i + 1, "total": scan.total_rows}
                     )
+                    if task_id:
+                        _mark_task_progress(
+                            task_id,
+                            kind="process_ingest",
+                            label=f"Ingest scan {scan_id}",
+                            total_items=scan.total_rows,
+                            processed_items=i + 1,
+                            success_items=total_success,
+                            failed_items=total_failed,
+                            message=f"Processed {i + 1}/{scan.total_rows} rows",
+                        )
 
                     if i % 1000 == 0:
                         session.commit()
@@ -181,6 +360,20 @@ def process_ingest(self, scan_id: int, file_data: bytes = None):  # noqa: ARG001
             scan.stats = {**scan.stats, "success": total_success, "failed": total_failed}
             session.commit()
 
+            if task_id:
+                _mark_task_finished(
+                    task_id,
+                    kind="process_ingest",
+                    label=f"Ingest scan {scan_id}",
+                    status="success",
+                    total_items=scan.total_rows,
+                    processed_items=total_success + total_failed,
+                    success_items=total_success,
+                    failed_items=total_failed,
+                    payload={"scan_id": scan_id},
+                    message="Ingest completed",
+                )
+
             return {
                 "status": "completed",
                 "processed": total_success + total_failed,
@@ -193,6 +386,20 @@ def process_ingest(self, scan_id: int, file_data: bytes = None):  # noqa: ARG001
             scan.status = "failed"
             scan.error_message = str(e)[:500]
             session.commit()
+            if task_id:
+                _mark_task_finished(
+                    task_id,
+                    kind="process_ingest",
+                    label=f"Ingest scan {scan_id}",
+                    status="failure",
+                    total_items=scan.total_rows,
+                    processed_items=scan.processed_rows,
+                    success_items=total_success,
+                    failed_items=total_failed,
+                    payload={"scan_id": scan_id},
+                    message="Ingest failed",
+                    error=str(e)[:500],
+                )
             raise
 
 
@@ -201,11 +408,47 @@ def probe_host(self, host_id: int):  # noqa: ARG001
     """Probe a single Ollama host"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    task_id = self.request.id
+    label = f"Probe host {host_id}"
 
     try:
+        if task_id:
+            _mark_task_started(task_id, kind="probe_host", label=label, total_items=1)
         service = ProbeService()
         geo_service = GeoService()
-        return _probe_single_host(host_id, service, loop, geo_service=geo_service)
+        result = _probe_single_host(host_id, service, loop, geo_service=geo_service)
+        if task_id:
+            status = result.get("status", "error")
+            failure_count = 1 if status in {"error", "timeout"} else 0
+            _mark_task_finished(
+                task_id,
+                kind="probe_host",
+                label=label,
+                status="success" if status != "error" else "failure",
+                total_items=1,
+                processed_items=1,
+                success_items=1 if status == "success" else 0,
+                failed_items=failure_count,
+                payload=result,
+                message=f"Probe finished with status {status}",
+                error=result.get("error"),
+            )
+        return result
+    except Exception as exc:
+        if task_id:
+            _mark_task_finished(
+                task_id,
+                kind="probe_host",
+                label=label,
+                status="failure",
+                total_items=1,
+                processed_items=0,
+                success_items=0,
+                failed_items=1,
+                message="Probe task crashed",
+                error=str(exc)[:500],
+            )
+        raise
 
     finally:
         loop.close()
@@ -216,28 +459,84 @@ def batch_probe(self, host_ids: list):  # noqa: ARG001
     """Probe multiple hosts"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    task_id = self.request.id
+    label = f"Probe batch ({len(host_ids)} hosts)"
 
     try:
+        if task_id:
+            _mark_task_started(task_id, kind="probe_batch", label=label, total_items=len(host_ids))
         service = ProbeService()
         geo_service = GeoService()
         results = []
         status_counts: dict[str, int] = {}
         geocode_counts: dict[str, int] = {}
 
-        for host_id in host_ids:
+        for index, host_id in enumerate(host_ids, start=1):
             result = _probe_single_host(host_id, service, loop, geo_service=geo_service)
             results.append(result)
             status = result.get("status", "error")
             status_counts[status] = status_counts.get(status, 0) + 1
             geocode_status = result.get("geocode_status", "skipped")
             geocode_counts[geocode_status] = geocode_counts.get(geocode_status, 0) + 1
+            if task_id:
+                _mark_task_progress(
+                    task_id,
+                    kind="probe_batch",
+                    label=label,
+                    total_items=len(host_ids),
+                    processed_items=index,
+                    success_items=status_counts.get("success", 0),
+                    failed_items=status_counts.get("error", 0) + status_counts.get("timeout", 0),
+                    payload={
+                        "status_counts": status_counts,
+                        "geocode_counts": geocode_counts,
+                    },
+                    message=f"Processed {index}/{len(host_ids)} hosts",
+                )
 
+        if task_id:
+            _mark_task_finished(
+                task_id,
+                kind="probe_batch",
+                label=label,
+                status="success",
+                total_items=len(host_ids),
+                processed_items=len(results),
+                success_items=status_counts.get("success", 0),
+                failed_items=status_counts.get("error", 0) + status_counts.get("timeout", 0),
+                payload={
+                    "status_counts": status_counts,
+                    "geocode_counts": geocode_counts,
+                },
+                message="Probe batch completed",
+            )
         return {
             "processed": len(results),
             "status_counts": status_counts,
             "geocode_counts": geocode_counts,
             "results": results,
         }
+    except Exception as exc:
+        if task_id:
+            _mark_task_finished(
+                task_id,
+                kind="probe_batch",
+                label=label,
+                status="failure",
+                total_items=len(host_ids),
+                processed_items=len(results) if "results" in locals() else 0,
+                success_items=status_counts.get("success", 0) if "status_counts" in locals() else 0,
+                failed_items=(status_counts.get("error", 0) + status_counts.get("timeout", 0))
+                if "status_counts" in locals()
+                else 0,
+                payload={
+                    "status_counts": status_counts if "status_counts" in locals() else {},
+                    "geocode_counts": geocode_counts if "geocode_counts" in locals() else {},
+                },
+                message="Probe batch failed",
+                error=str(exc)[:500],
+            )
+        raise
     finally:
         loop.close()
 
@@ -245,6 +544,11 @@ def batch_probe(self, host_ids: list):  # noqa: ARG001
 @celery_app.task(bind=True, name="worker.tasks.queue_discovered_hosts")
 def queue_discovered_hosts(self, limit: int | None = None, batch_size: int | None = None):  # noqa: ARG001
     """Queue probe batches for hosts that are still only discovered."""
+    task_id = self.request.id
+    label = "Queue discovered probe backlog"
+    if task_id:
+        _mark_task_started(task_id, kind="queue_discovered_hosts", label=label)
+
     with Session(engine) as session:
         query = select(Host.id).where(Host.status == "discovered").order_by(Host.id.asc())
         if limit is not None:
@@ -252,6 +556,19 @@ def queue_discovered_hosts(self, limit: int | None = None, batch_size: int | Non
         host_ids = list(session.exec(query).all())
 
     task_ids = queue_host_probes(host_ids, batch_size=batch_size)
+    if task_id:
+        _mark_task_finished(
+            task_id,
+            kind="queue_discovered_hosts",
+            label=label,
+            status="success",
+            total_items=len(host_ids),
+            processed_items=len(host_ids),
+            success_items=len(task_ids),
+            failed_items=0,
+            payload={"task_ids": task_ids},
+            message=f"Queued {len(task_ids)} probe tasks",
+        )
     return {
         "queued_hosts": len(host_ids),
         "batch_tasks": len(task_ids),
@@ -267,6 +584,11 @@ def queue_ungeocoded_hosts(
     include_discovered: bool = False,
 ):  # noqa: ARG001
     """Queue probes for hosts missing geography so probe-time geocoding can fill them in."""
+    task_id = self.request.id
+    label = "Queue ungeocoded host backlog"
+    if task_id:
+        _mark_task_started(task_id, kind="queue_ungeocoded_hosts", label=label)
+
     with Session(engine) as session:
         query = (
             select(Host.id)
@@ -287,6 +609,19 @@ def queue_ungeocoded_hosts(
         host_ids = list(session.exec(query).all())
 
     task_ids = queue_host_probes(host_ids, batch_size=batch_size)
+    if task_id:
+        _mark_task_finished(
+            task_id,
+            kind="queue_ungeocoded_hosts",
+            label=label,
+            status="success",
+            total_items=len(host_ids),
+            processed_items=len(host_ids),
+            success_items=len(task_ids),
+            failed_items=0,
+            payload={"task_ids": task_ids, "include_discovered": include_discovered},
+            message=f"Queued {len(task_ids)} probe tasks",
+        )
     return {
         "queued_hosts": len(host_ids),
         "batch_tasks": len(task_ids),

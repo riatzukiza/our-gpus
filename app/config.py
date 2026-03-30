@@ -5,13 +5,19 @@ class Settings(BaseSettings):
     app_env: str = "dev"
     database_url: str = "sqlite:///./data/ollama.db"
     redis_url: str = "redis://localhost:6379/0"
+    admin_api_key: str = ""
+    our_gpus_api_key: str = ""
+    proxx_api_key: str = ""
     probe_timeout_secs: int = 5
     probe_concurrency: int = 200
     probe_retries: int = 2
     probe_batch_size: int = 100
     geocode_timeout_secs: int = 5
     geocode_retries: int = 2
-    geocode_provider_url: str = "https://ipwho.is"
+    geocode_data_path: str = "/app/data/geoip2fast-city.dat.gz"
+    geocode_data_url: str = (
+        "https://github.com/rabuchaim/geoip2fast/releases/download/LATEST/geoip2fast-city.dat.gz"
+    )
     upload_max_mb: int = 4096
     allowed_origins: str = "http://localhost:5173,http://localhost:3000,https://our-gpu.shuv.dev"
     log_level: str = "INFO"
@@ -26,6 +32,9 @@ class Settings(BaseSettings):
 
     def get_allowed_origins(self) -> list[str]:
         return [origin.strip() for origin in self.allowed_origins.split(",")]
+
+    def get_admin_api_key(self) -> str:
+        return self.admin_api_key or self.our_gpus_api_key or self.proxx_api_key
 
 
 settings = Settings()

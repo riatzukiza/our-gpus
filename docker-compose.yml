@@ -13,8 +13,11 @@ services:
       - ./data:/app/data
       - ./.env:/app/.env
     environment:
+      - ADMIN_API_KEY=${ADMIN_API_KEY:-}
       - DATABASE_URL=${API_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-our_gpus}:${POSTGRES_PASSWORD:-our_gpus_dev_password}@127.0.0.1:5432/${POSTGRES_DB:-our_gpus}}
       - MASSCAN_INTERFACE=eth0
+      - OUR_GPUS_API_KEY=${OUR_GPUS_API_KEY:-}
+      - PROXX_API_KEY=${PROXX_API_KEY:-}
       - REDIS_URL=redis://127.0.0.1:6379/0
     depends_on:
       postgres:

@@ -1,11 +1,13 @@
 import csv
 import io
 import json
+import secrets
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from celery.result import AsyncResult
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Header, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from prometheus_client import Counter, Histogram, generate_latest
@@ -14,7 +16,7 @@ from sqlalchemy import or_
 from sqlmodel import Session, func, select
 
 from app.config import settings
-from app.db import Host, HostModel, Model, Probe, Scan, get_session, init_db
+from app.db import Host, HostModel, Model, Probe, Scan, TaskJob, get_session, init_db
 from app.ingest import IngestService
 from app.masscan import MasscanService
 from app.probe import ProbeService
@@ -29,6 +31,8 @@ from app.schemas import (
     PromptResponse,
     ScanResponse,
 )
+from worker.celery_app import celery_app
+from worker.tasks import register_task_job
 
 app = FastAPI(title="our gpu API", version="1.0.0")
 
@@ -56,6 +60,73 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     init_db()
+
+
+def require_admin_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+    expected_key = settings.get_admin_api_key()
+    if not expected_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin API key is not configured",
+        )
+
+    if not x_api_key or not secrets.compare_digest(x_api_key, expected_key):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin API key",
+        )
+
+
+def _serialize_task_job(job: TaskJob) -> dict:
+    celery_state = AsyncResult(job.task_id, app=celery_app).state
+    return {
+        "task_id": job.task_id,
+        "kind": job.kind,
+        "label": job.label,
+        "status": job.status,
+        "celery_state": celery_state,
+        "total_items": job.total_items,
+        "processed_items": job.processed_items,
+        "success_items": job.success_items,
+        "failed_items": job.failed_items,
+        "message": job.message,
+        "error": job.error,
+        "payload": job.payload,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+def _inspect_workers() -> dict:
+    inspector = celery_app.control.inspect(timeout=1)
+    active = inspector.active() or {}
+    reserved = inspector.reserved() or {}
+    scheduled = inspector.scheduled() or {}
+    stats = inspector.stats() or {}
+
+    worker_names = sorted(set(active) | set(reserved) | set(scheduled) | set(stats))
+    workers = []
+    for worker_name in worker_names:
+        workers.append(
+            {
+                "name": worker_name,
+                "online": worker_name in stats,
+                "active_count": len(active.get(worker_name, [])),
+                "reserved_count": len(reserved.get(worker_name, [])),
+                "scheduled_count": len(scheduled.get(worker_name, [])),
+            }
+        )
+
+    return {
+        "workers": workers,
+        "totals": {
+            "workers": len(workers),
+            "active": sum(worker["active_count"] for worker in workers),
+            "reserved": sum(worker["reserved_count"] for worker in workers),
+            "scheduled": sum(worker["scheduled_count"] for worker in workers),
+        },
+    }
 
 
 @app.post("/api/ingest", response_model=IngestResponse)
@@ -178,7 +249,11 @@ async def get_scan(scan_id: int, session: Session = Depends(get_session)):
 
 
 @app.post("/api/probe")
-async def trigger_probe(request: ProbeRequest, session: Session = Depends(get_session)):
+async def trigger_probe(
+    request: ProbeRequest,
+    session: Session = Depends(get_session),
+    _: None = Depends(require_admin_api_key),
+):
     # Get hosts to probe
     query = select(Host)
     if request.host_ids:
@@ -257,10 +332,17 @@ async def trigger_probe(request: ProbeRequest, session: Session = Depends(get_se
 async def trigger_discovered_probe_backlog(
     limit: int | None = Query(default=None, ge=1),
     batch_size: int | None = Query(default=None, ge=1, le=1000),
+    _: None = Depends(require_admin_api_key),
 ):
     from worker.tasks import queue_discovered_hosts
 
     task = queue_discovered_hosts.delay(limit=limit, batch_size=batch_size)
+    register_task_job(
+        task.id,
+        kind="queue_discovered_hosts",
+        label="Queue discovered probe backlog",
+        payload={"limit": limit, "batch_size": batch_size},
+    )
     return {
         "message": "Queued background probe backlog task for discovered hosts",
         "task_id": task.id,
@@ -274,6 +356,7 @@ async def trigger_geocode_backlog(
     limit: int | None = Query(default=None, ge=1),
     batch_size: int | None = Query(default=None, ge=1, le=1000),
     include_discovered: bool = Query(default=False),
+    _: None = Depends(require_admin_api_key),
 ):
     from worker.tasks import queue_ungeocoded_hosts
 
@@ -282,12 +365,51 @@ async def trigger_geocode_backlog(
         batch_size=batch_size,
         include_discovered=include_discovered,
     )
+    register_task_job(
+        task.id,
+        kind="queue_ungeocoded_hosts",
+        label="Queue ungeocoded host backlog",
+        payload={
+            "limit": limit,
+            "batch_size": batch_size,
+            "include_discovered": include_discovered,
+        },
+    )
     return {
         "message": "Queued background geocode backlog task for hosts missing geography",
         "task_id": task.id,
         "limit": limit,
         "batch_size": batch_size or settings.probe_batch_size,
         "include_discovered": include_discovered,
+    }
+
+
+@app.get("/api/admin/session")
+async def get_admin_session(_: None = Depends(require_admin_api_key)):
+    return {"authorized": True}
+
+
+@app.get("/api/admin/jobs")
+async def get_admin_jobs(
+    limit: int = Query(default=50, ge=1, le=200),
+    _: None = Depends(require_admin_api_key),
+    session: Session = Depends(get_session),
+):
+    jobs = session.exec(select(TaskJob).order_by(TaskJob.created_at.desc()).limit(limit)).all()
+    summary_rows = session.exec(
+        select(TaskJob.kind, TaskJob.status, func.count(TaskJob.id))
+        .group_by(TaskJob.kind, TaskJob.status)
+        .order_by(TaskJob.kind, TaskJob.status)
+    ).all()
+
+    summary: dict[str, dict[str, int]] = {}
+    for kind, status_name, count in summary_rows:
+        summary.setdefault(kind, {})[status_name] = count
+
+    return {
+        "workers": _inspect_workers(),
+        "summary": summary,
+        "jobs": [_serialize_task_job(job) for job in jobs],
     }
 
 
@@ -722,7 +844,11 @@ async def ready_check(session: Session = Depends(get_session)):
 
 
 @app.delete("/api/hosts/{host_id}")
-async def delete_host(host_id: int, session: Session = Depends(get_session)):
+async def delete_host(
+    host_id: int,
+    session: Session = Depends(get_session),
+    _: None = Depends(require_admin_api_key),
+):
     host = session.get(Host, host_id)
     if not host:
         raise HTTPException(404, "Host not found")
@@ -743,7 +869,10 @@ async def delete_host(host_id: int, session: Session = Depends(get_session)):
 
 
 @app.delete("/api/hosts")
-async def clear_all_hosts(session: Session = Depends(get_session)):
+async def clear_all_hosts(
+    session: Session = Depends(get_session),
+    _: None = Depends(require_admin_api_key),
+):
     # Delete all host-related records
     session.exec(select(HostModel)).all()
     for hm in session.exec(select(HostModel)).all():
@@ -775,6 +904,7 @@ class ClearFilteredHostsRequest(BaseModel):
 async def clear_filtered_hosts(
     request: ClearFilteredHostsRequest,
     session: Session = Depends(get_session),
+    _: None = Depends(require_admin_api_key),
 ):
     """Clear hosts that match the specified filters"""
     # Build query to find hosts to delete
@@ -836,7 +966,9 @@ async def clear_filtered_hosts(
 
 @app.get("/api/probe-stats")
 async def get_recent_probe_stats(
-    minutes: int = Query(5, ge=1, le=60), session: Session = Depends(get_session)
+    minutes: int = Query(5, ge=1, le=60),
+    session: Session = Depends(get_session),
+    _: None = Depends(require_admin_api_key),
 ):
     """Get probe statistics for the last N minutes"""
     from datetime import timedelta
@@ -1060,6 +1192,46 @@ def _on_aco_block_result(result: BlockScanResult) -> None:
 
 
 def _aco_not_running_snapshot() -> dict:
+    from app.aco import AntColony
+    from app.masscan_aco import SchedulerConfig
+
+    config = SchedulerConfig()
+    state_file = config.state_file
+
+    try:
+        if Path(state_file).exists():
+            with open(state_file) as file_handle:
+                data = json.load(file_handle)
+            aco = AntColony.from_dict(data)
+            stats = aco.stats()
+            top = aco.top_blocks(20)
+            return {
+                "status": "not_running",
+                "started_at": None,
+                "uptime_seconds": None,
+                "prefix_len": None,
+                "estimated_block_duration_s": None,
+                "config": {
+                    "port": config.port,
+                    "rate": config.rate,
+                    "max_block_duration_s": config.max_block_duration_s,
+                    "min_scan_interval_s": config.min_scan_interval_s,
+                },
+                "stats": stats,
+                "current_job": None,
+                "recent_results": [],
+                "top_blocks": [
+                    {
+                        "cidr": cidr,
+                        "pheromone": round(pheromone, 4),
+                    }
+                    for cidr, pheromone in top
+                ],
+                "last_error": None,
+            }
+    except Exception as error:
+        print(f"[WARN] Failed to load ACO state for dashboard: {error}")
+
     return {
         "status": "not_running",
         "started_at": None,
@@ -1175,6 +1347,7 @@ async def get_aco_dashboard(
     history_limit: int = Query(default=20, ge=1, le=100),
     country_limit: int = Query(default=25, ge=1, le=100),
     session: Session = Depends(get_session),
+    _: None = Depends(require_admin_api_key),
 ):
     scheduler = (
         _aco_scheduler.dashboard_snapshot(result_limit=history_limit, block_limit=20)
@@ -1207,7 +1380,10 @@ def _read_log_file(log_path: str, max_lines: int = 200) -> str | None:
 
 
 @app.get("/api/aco/logs/current")
-async def get_aco_current_logs(lines: int = Query(default=200, ge=1, le=2000)):
+async def get_aco_current_logs(
+    lines: int = Query(default=200, ge=1, le=2000),
+    _: None = Depends(require_admin_api_key),
+):
     """Get logs for the currently running scan, if any."""
     if not _aco_scheduler:
         return {"status": "not_running", "logs": None}
@@ -1243,7 +1419,11 @@ async def get_aco_current_logs(lines: int = Query(default=200, ge=1, le=2000)):
 
 
 @app.get("/api/aco/logs/{scan_uuid}")
-async def get_aco_scan_logs(scan_uuid: str, lines: int = Query(default=200, ge=1, le=2000)):
+async def get_aco_scan_logs(
+    scan_uuid: str,
+    lines: int = Query(default=200, ge=1, le=2000),
+    _: None = Depends(require_admin_api_key),
+):
     """Get logs for a specific scan by UUID."""
     if not _aco_scheduler:
         raise HTTPException(status_code=503, detail="ACO scheduler not running")
@@ -1271,7 +1451,7 @@ async def get_aco_scan_logs(scan_uuid: str, lines: int = Query(default=200, ge=1
 
 
 @app.post("/api/aco/scan/start")
-async def start_aco_scan():
+async def start_aco_scan(_: None = Depends(require_admin_api_key)):
     """Start the ACO-guided masscan block scanner."""
     global _aco_scheduler
     if _aco_scheduler:
@@ -1291,7 +1471,7 @@ async def start_aco_scan():
 
 
 @app.post("/api/aco/scan/stop")
-async def stop_aco_scan():
+async def stop_aco_scan(_: None = Depends(require_admin_api_key)):
     """Stop the ACO-guided masscan block scanner."""
     global _aco_scheduler
     if not _aco_scheduler:
@@ -1307,7 +1487,7 @@ async def stop_aco_scan():
 
 
 @app.get("/api/aco/scan/stats")
-async def get_aco_scan_stats():
+async def get_aco_scan_stats(_: None = Depends(require_admin_api_key)):
     """Get ACO scanner stats."""
     if not _aco_scheduler:
         return {"status": "not_running"}
@@ -1323,7 +1503,10 @@ async def get_aco_scan_stats():
 
 
 @app.get("/api/aco/scan/blocks")
-async def get_aco_top_blocks(n: int = Query(default=20, ge=1, le=100)):
+async def get_aco_top_blocks(
+    n: int = Query(default=20, ge=1, le=100),
+    _: None = Depends(require_admin_api_key),
+):
     """Get top N blocks by ACO pheromone score."""
     if not _aco_scheduler:
         return {"status": "not_running", "blocks": []}
@@ -1332,7 +1515,7 @@ async def get_aco_top_blocks(n: int = Query(default=20, ge=1, le=100)):
 
 
 @app.post("/api/aco/scan/one")
-async def scan_one_block():
+async def scan_one_block(_: None = Depends(require_admin_api_key)):
     """Run a single ACO-selected block scan (manual)."""
     if not _aco_scheduler:
         raise HTTPException(status_code=400, detail="ACO scheduler not running")

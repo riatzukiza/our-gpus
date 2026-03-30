@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from 'react-query'
-import { Search, Download, RefreshCw, Cpu, Wifi, WifiOff, Trash2, ArrowUpDown, ArrowUp, ArrowDown, AlertCircle, Clock, HelpCircle } from 'lucide-react'
+import { Search, Download, Cpu, Wifi, WifiOff, Trash2, ArrowUpDown, ArrowUp, ArrowDown, AlertCircle, Clock, HelpCircle } from 'lucide-react'
 import axios from 'axios'
 import { Link } from 'react-router-dom'
 import { format } from 'date-fns'
+import { getStoredAdminApiKey } from '../lib/adminAuth'
 
 interface Host {
   id: number
@@ -30,10 +31,8 @@ export default function Explore() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(50)
   const [clearing, setClearing] = useState(false)
-  const [probing, setProbing] = useState(false)
-  const [probeMessage, setProbeMessage] = useState('')
-  const [probeStats, setProbeStats] = useState<any>(null)
   const queryClient = useQueryClient()
+  const hasAdminKey = Boolean(getStoredAdminApiKey())
 
   // Fetch available model names for dropdown
   const { data: modelNamesData, isLoading: modelsLoading } = useQuery(
@@ -69,38 +68,7 @@ export default function Explore() {
   // Use empty array as fallback if data is not available
   const modelFamilies = modelFamiliesData || []
 
-  const startProbePolling = () => {
-    const pollInterval = setInterval(async () => {
-      try {
-        const statsResponse = await axios.get(`/api/probe-stats?minutes=2`)
-        const stats = statsResponse.data
-        setProbeStats(stats)
-        
-        // Update message with progress
-        const progress = `Probed: ${stats.probes_completed}/${stats.total_hosts} - Success: ${stats.success_count}, Errors: ${stats.error_count}, Timeouts: ${stats.timeout_count}`
-        setProbeMessage(`Probing in progress... ${progress}`)
-        
-        // Check if we should stop polling (no new probes in last minute suggests completion)
-        if (stats.probes_completed > 0 && stats.probes_completed >= stats.total_hosts * 0.95) {
-          clearInterval(pollInterval)
-          setProbeMessage(`Probe batch completed! Success: ${stats.success_count}, Errors: ${stats.error_count}, Timeouts: ${stats.timeout_count}. Refreshing data...`)
-          setTimeout(() => {
-            refetch()
-            setProbing(false)
-            setProbeMessage('')
-            setProbeStats(null)
-          }, 2000)
-        }
-      } catch (error) {
-        console.error('Error polling probe status:', error)
-        clearInterval(pollInterval)
-        setProbeMessage('Error monitoring probe progress. Check logs.')
-        setProbing(false)
-      }
-    }, 3000) // Poll every 3 seconds
-  }
-
-  const { data, isLoading, refetch } = useQuery(
+  const { data, isLoading } = useQuery(
     ['hosts', page, pageSize, filters, search, sortBy],
     async () => {
       const params = new URLSearchParams({
@@ -219,88 +187,6 @@ export default function Explore() {
     window.open(`/api/export?${params}`, '_blank')
   }
 
-  const handleProbe = async (hostId?: number) => {
-    // Safety check for large batches
-    if (!hostId && totalHosts > 1000) {
-      const confirmed = window.confirm(
-        `You are about to probe ${totalHosts} hosts. This may take several minutes and use significant system resources. Continue?`
-      )
-      if (!confirmed) return
-    }
-    
-    const payload: any = {}
-    
-    if (hostId) {
-      payload.host_ids = [hostId]
-    } else {
-      // Only add filters if they have actual values
-      const activeFilters: any = {}
-      if (filters.model) activeFilters.model = filters.model
-      if (filters.family) activeFilters.family = filters.family
-      if (filters.status) activeFilters.status = filters.status
-      if (filters.gpu !== null) activeFilters.gpu = filters.gpu
-      
-      if (Object.keys(activeFilters).length > 0) {
-        payload.filter = activeFilters
-      } else {
-        // When no filters are set, explicitly request to probe all hosts
-        payload.probe_all = true
-      }
-    }
-    
-    console.log('Probe payload:', payload)
-    
-    setProbing(true)
-    setProbeMessage('')
-    
-    try {
-      const response = await axios.post('/api/probe', payload, {
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      })
-      console.log('Probe response:', response.data)
-      const baseMessage = response.data.message || `Queued probe tasks`
-      
-      // Start polling for probe progress using time-based approach
-      startProbePolling()
-      
-      if (!hostId) {
-        // Add context about total hosts when probing all/filtered
-        const contextMessage = payload.probe_all 
-          ? `(${totalHosts} total hosts)`
-          : Object.keys(payload.filter || {}).length > 0 
-            ? `(${totalHosts} matching hosts)`
-            : `(limited to 100 hosts)`
-        setProbeMessage(`${baseMessage} ${contextMessage}. Monitoring progress...`)
-      } else {
-        setProbeMessage(`${baseMessage}. Refreshing in 5 seconds...`)
-        // For single host probes, use the old refresh logic
-        setTimeout(() => {
-          refetch()
-          setProbing(false)
-          setProbeMessage('')
-        }, 5000)
-      }
-      
-      // Refresh data after a delay to see probe results
-      setTimeout(() => {
-        refetch()
-        setProbing(false)
-        setProbeMessage('')
-      }, 5000)
-    } catch (error: any) {
-      console.error('Probe error:', error)
-      if (error.response) {
-        console.error('Error response data:', error.response.data)
-        console.error('Error response status:', error.response.status)
-        console.error('Error response detail:', error.response.data?.detail)
-      }
-      setProbing(false)
-      setProbeMessage('Failed to initiate probe')
-    }
-  }
-
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'online': return 'text-green-500'
@@ -411,19 +297,6 @@ export default function Explore() {
           </button>
           
           <button
-            onClick={() => handleProbe()}
-            disabled={probing}
-            className={`px-3 py-2 text-sm ${probing ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'} text-white rounded-lg transition-colors flex items-center`}
-            title={`Probe ${totalHosts} hosts${Object.values(filters).some(v => v !== null && v !== '') ? ' (filtered)' : ' (all hosts)'}`}
-          >
-            <RefreshCw className={`w-3 h-3 mr-1.5 ${probing ? 'animate-spin' : ''}`} />
-            {probing 
-              ? 'Probing...' 
-              : `Probe (${totalHosts})`
-            }
-          </button>
-          
-          <button
             onClick={() => handleExport('csv')}
             className="px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors flex items-center text-gray-700 dark:text-gray-300"
           >
@@ -431,15 +304,17 @@ export default function Explore() {
             Export
           </button>
           
-          <button
-            onClick={handleClearHosts}
-            disabled={clearing}
-            className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center"
-            title={getClearButtonText()}
-          >
-            <Trash2 className="w-3 h-3 mr-1.5" />
-            {getClearButtonText()}
-          </button>
+          {hasAdminKey && (
+            <button
+              onClick={handleClearHosts}
+              disabled={clearing}
+              className="px-3 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center"
+              title={getClearButtonText()}
+            >
+              <Trash2 className="w-3 h-3 mr-1.5" />
+              {getClearButtonText()}
+            </button>
+          )}
         </div>
         
         {/* Model filter row */}
@@ -508,31 +383,6 @@ export default function Explore() {
         </div>
       </div>
       
-      {probeMessage && (
-        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 px-4 py-3 rounded-lg">
-          <div className="flex items-center justify-between">
-            <span>{probeMessage}</span>
-            {probing && probeStats && (
-              <div className="text-sm space-x-4">
-                <span>✅ {probeStats.success_count}</span>
-                <span>❌ {probeStats.error_count}</span>
-                <span>⏱️ {probeStats.timeout_count}</span>
-              </div>
-            )}
-          </div>
-          {probing && probeStats && probeStats.progress_percent !== undefined && (
-            <div className="mt-2">
-              <div className="bg-blue-200 dark:bg-blue-800 rounded-full h-2">
-                <div 
-                  className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                  style={{ width: `${probeStats.progress_percent}%` }}
-                ></div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-      
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-x-auto">
         <div className="min-w-[1200px]">
           <table className="w-full divide-y divide-gray-200 dark:divide-gray-700 table-fixed">
@@ -589,9 +439,11 @@ export default function Explore() {
                     )}
                   </div>
                 </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider truncate">
-                  Actions
-                </th>
+                {hasAdminKey && (
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider truncate">
+                    Actions
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
@@ -649,24 +501,19 @@ export default function Explore() {
                   <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 truncate">
                     {format(new Date(host.last_seen), 'MMM d, HH:mm')}
                   </td>
-                  <td className="px-4 py-3 whitespace-nowrap text-sm">
-                    <div className="flex items-center space-x-1">
-                      <button
-                        onClick={() => handleProbe(host.id)}
-                        className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 p-1 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition-colors"
-                        title="Probe host"
-                      >
-                        <RefreshCw className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={() => handleDeleteHost(host.id)}
-                        className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 p-1 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors"
-                        title="Delete host"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </td>
+                  {hasAdminKey && (
+                    <td className="px-4 py-3 whitespace-nowrap text-sm">
+                      <div className="flex items-center space-x-1">
+                        <button
+                          onClick={() => handleDeleteHost(host.id)}
+                          className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 p-1 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors"
+                          title="Delete host"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
