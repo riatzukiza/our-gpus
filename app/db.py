@@ -22,12 +22,12 @@ class Host(SQLModel, table=True):
     gpu_vram_mb: int | None = None
     geo_country: str | None = None
     geo_city: str | None = None
+    geo_lat: float | None = None
+    geo_lon: float | None = None
     status: str = Field(default="unknown")  # online, offline, error, rate_limited
     last_error: str | None = None
 
-    __table_args__ = (
-        Index("idx_ip_port", "ip", "port"),
-    )
+    __table_args__ = (Index("idx_ip_port", "ip", "port"),)
 
 
 class Model(SQLModel, table=True):
@@ -105,10 +105,14 @@ def init_db(database_url: str = None):
     from app.config import settings
 
     db_url = database_url or settings.database_url
-    engine = create_engine(db_url, echo=False, connect_args={"check_same_thread": False} if "sqlite" in db_url else {})
+    engine_kwargs = {"echo": False, "pool_pre_ping": True}
+    if "sqlite" in db_url:
+        engine_kwargs["connect_args"] = {"check_same_thread": False}
+    engine = create_engine(db_url, **engine_kwargs)
     SQLModel.metadata.create_all(engine)
 
     from sqlmodel import Session
+
     SessionLocal = Session
 
 

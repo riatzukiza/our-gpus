@@ -89,14 +89,43 @@ def test_trigger_probe(client, session):
     session.add(test_host)
     session.commit()
 
-    with patch("worker.tasks.probe_host") as mock_task:
-        mock_task.delay.return_value.id = "task-456"
+    with patch("worker.tasks.queue_host_probes") as mock_queue:
+        mock_queue.return_value = ["task-456"]
 
         response = client.post("/api/probe", json={"host_ids": [1]})
 
         assert response.status_code == 200
         data = response.json()
-        assert "Queued 1 probe tasks" in data["message"]
+        assert "Queued 1 probe task" in data["message"]
+
+
+def test_trigger_discovered_probe_backlog(client):
+    with patch("worker.tasks.queue_discovered_hosts") as mock_task:
+        mock_task.delay.return_value.id = "task-789"
+
+        response = client.post("/api/probe/discovered?limit=50&batch_size=25")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["task_id"] == "task-789"
+        assert data["limit"] == 50
+        assert data["batch_size"] == 25
+
+
+def test_trigger_geocode_backlog(client):
+    with patch("worker.tasks.queue_ungeocoded_hosts") as mock_task:
+        mock_task.delay.return_value.id = "task-999"
+
+        response = client.post(
+            "/api/geocode/backlog?limit=20&batch_size=10&include_discovered=true"
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["task_id"] == "task-999"
+        assert data["limit"] == 20
+        assert data["batch_size"] == 10
+        assert data["include_discovered"] is True
 
 
 def test_export_csv(client):

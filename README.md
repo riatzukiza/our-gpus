@@ -28,9 +28,9 @@ docker compose up -d --build
 ```
 
 3. **Access the platform**:
-- Web UI: http://localhost:5173
-- API: http://localhost:8000
-- API Docs: http://localhost:8000/docs
+- Web UI: http://localhost:15173
+- API: http://localhost:18000
+- API Docs: http://localhost:18000/docs
 
 4. **Upload data**:
 - Navigate to Upload page
@@ -97,8 +97,21 @@ Key environment variables in `.env`:
 
 - `PROBE_TIMEOUT_SECS`: Timeout for each probe (default: 5)
 - `PROBE_CONCURRENCY`: Max concurrent probes (default: 200)
+- `PROBE_BATCH_SIZE`: Hosts queued per Celery batch task (default: 100)
+- `GEOCODE_TIMEOUT_SECS`: Timeout for each IP geocode lookup (default: 5)
+- `GEOCODE_RETRIES`: Retries for background IP geocode lookups (default: 2)
+- `GEOCODE_PROVIDER_URL`: IP geolocation API base URL (default: `https://ipwho.is`)
+- `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`: Postgres runtime settings
+- `API_DATABASE_URL`, `WORKER_DATABASE_URL`: Explicit Postgres URLs for host-networked API and bridged worker
 - `UPLOAD_MAX_MB`: Max upload size (default: 4096)
 - `BATCH_SIZE`: Processing batch size (default: 1000)
+
+### Migrating from SQLite to Postgres
+
+1. Start the Postgres service: `docker compose up -d postgres`
+2. Run the copy tool against a fresh target database:
+   `docker compose run --rm api python cli/migrate_sqlite_to_postgres.py --source sqlite:////app/data/ollama.db --target "$API_DATABASE_URL"`
+3. Recreate `api` and `worker` so they use the Postgres URLs.
 
 ## Performance
 

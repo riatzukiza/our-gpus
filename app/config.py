@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     probe_timeout_secs: int = 5
     probe_concurrency: int = 200
     probe_retries: int = 2
+    probe_batch_size: int = 100
+    geocode_timeout_secs: int = 5
+    geocode_retries: int = 2
+    geocode_provider_url: str = "https://ipwho.is"
     upload_max_mb: int = 4096
     allowed_origins: str = "http://localhost:5173,http://localhost:3000,https://our-gpu.shuv.dev"
     log_level: str = "INFO"

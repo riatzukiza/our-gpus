@@ -3,20 +3,26 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    ports:
-      - "8000:8000"
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18000", "--reload"]
     volumes:
       - ./app:/app/app
       - ./data:/app/data
       - ./.env:/app/.env
     environment:
-      - DATABASE_URL=sqlite:////app/data/ollama.db
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=${API_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-our_gpus}:${POSTGRES_PASSWORD:-our_gpus_dev_password}@127.0.0.1:5432/${POSTGRES_DB:-our_gpus}}
+      - MASSCAN_INTERFACE=eth0
+      - REDIS_URL=redis://127.0.0.1:6379/0
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:18000/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -33,13 +39,32 @@ services:
       - ./data:/app/data
       - ./.env:/app/.env
     environment:
-      - DATABASE_URL=sqlite:////app/data/ollama.db
+      - DATABASE_URL=${WORKER_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-our_gpus}:${POSTGRES_PASSWORD:-our_gpus_dev_password}@postgres:5432/${POSTGRES_DB:-our_gpus}}
       - REDIS_URL=redis://redis:6379/0
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       api:
         condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-our_gpus}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-our_gpus_dev_password}
+      - POSTGRES_DB=${POSTGRES_DB:-our_gpus}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-our_gpus} -d ${POSTGRES_DB:-our_gpus}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
 
   redis:
@@ -60,12 +85,15 @@ services:
       context: ./web
       dockerfile: Dockerfile
     ports:
-      - "5173:5173"
+      - "15173:5173"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      - VITE_API_URL=http://api:8000
+      - VITE_API_URL=http://host.docker.internal:18000
     depends_on:
       - api
     restart: unless-stopped
 
 volumes:
+  postgres_data:
   redis_data:

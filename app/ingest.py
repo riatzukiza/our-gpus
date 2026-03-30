@@ -4,6 +4,7 @@ import logging
 import socket
 import struct
 from collections.abc import Generator
+from datetime import datetime
 from typing import Any
 
 import ijson
@@ -121,6 +122,27 @@ class IngestService:
 
     def _map_record(self, record: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
         """Map source fields to our schema"""
+        if not mapping:
+            ip = record.get("ip")
+            if isinstance(ip, int):
+                ip = self._ip_int_to_str(ip)
+
+            port = record.get("port")
+            if port is None:
+                ports = record.get("ports")
+                if isinstance(ports, list):
+                    for port_entry in ports:
+                        if isinstance(port_entry, dict) and port_entry.get("port") is not None:
+                            port = port_entry["port"]
+                            break
+
+            return {
+                "ip": ip,
+                "port": port if port is not None else 11434,
+                "geo_country": record.get("geo_country"),
+                "geo_city": record.get("geo_city"),
+            }
+
         result = {}
 
         for our_field, source_field in mapping.items():
@@ -143,10 +165,16 @@ class IngestService:
         """Convert integer IP to string"""
         return socket.inet_ntoa(struct.pack("!I", ip_int))
 
-    def process_batch(self, records: list, scan_id: int) -> tuple[int, int]:  # noqa: ARG002
+    def process_batch(
+        self,
+        records: list,
+        scan_id: int,  # noqa: ARG002
+        auto_probe_new_hosts: bool = False,
+    ) -> tuple[int, int]:
         """Process a batch of records"""
         success = 0
         failed = 0
+        new_hosts: list[Host] = []
 
         for record in records:
             if not record.get("ip"):
@@ -169,9 +197,11 @@ class IngestService:
                     status="discovered",
                 )
                 self.session.add(host)
+                new_hosts.append(host)
                 success += 1
             else:
                 # Update geo if provided
+                existing.last_seen = datetime.utcnow()
                 if record.get("geo_country"):
                     existing.geo_country = record["geo_country"]
                 if record.get("geo_city"):
@@ -179,4 +209,10 @@ class IngestService:
                 success += 1
 
         self.session.commit()
+
+        if auto_probe_new_hosts and new_hosts:
+            from worker.tasks import queue_host_probes
+
+            queue_host_probes([host.id for host in new_hosts if host.id is not None])
+
         return success, failed

@@ -130,7 +130,7 @@ def main():
             batch.append(record)
 
             if len(batch) >= args.batch_size:
-                success, failed = service.process_batch(batch, scan.id)
+                success, failed = service.process_batch(batch, scan.id, auto_probe_new_hosts=True)
                 total_success += success
                 total_failed += failed
                 batch = []
@@ -140,7 +140,7 @@ def main():
 
         # Process remaining
         if batch:
-            success, failed = service.process_batch(batch, scan.id)
+            success, failed = service.process_batch(batch, scan.id, auto_probe_new_hosts=True)
             total_success += success
             total_failed += failed
 
