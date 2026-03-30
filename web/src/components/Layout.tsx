@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { Upload, Search, Activity, Moon, Sun } from 'lucide-react'
+import { Upload, Search, Activity, Moon, Sun, Settings } from 'lucide-react'
 import { useDarkMode } from '../contexts/DarkModeContext'
 
 interface LayoutProps {
@@ -11,7 +11,7 @@ export default function Layout({ children }: LayoutProps) {
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-      <nav className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700">
+      <nav aria-label="Main" className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16">
             <div className="flex">
@@ -38,10 +38,18 @@ export default function Layout({ children }: LayoutProps) {
                   <Upload className="w-4 h-4 mr-2" />
                   Upload
                 </Link>
+                <Link
+                  to="/admin"
+                  className="inline-flex items-center px-1 pt-1 text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
+                >
+                  <Settings className="w-4 h-4 mr-2" />
+                  Admin
+                </Link>
               </div>
             </div>
             <div className="flex items-center space-x-4">
               <button
+                type="button"
                 onClick={toggleDark}
                 className="p-2 rounded-lg text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                 title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
@@ -56,7 +64,7 @@ export default function Layout({ children }: LayoutProps) {
           </div>
         </div>
       </nav>
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+      <main id="main-content" className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
         {children}
       </main>
     </div>

@@ -5,6 +5,7 @@ import Layout from './components/Layout'
 import Upload from './pages/Upload'
 import Explore from './pages/Explore'
 import HostDetail from './pages/HostDetail'
+import Admin from './pages/Admin'
 
 const queryClient = new QueryClient()
 
@@ -18,6 +19,7 @@ function App() {
               <Route path="/" element={<Explore />} />
               <Route path="/upload" element={<Upload />} />
               <Route path="/host/:id" element={<HostDetail />} />
+              <Route path="/admin" element={<Admin />} />
             </Routes>
           </Layout>
         </Router>

@@ -1,18 +1,22 @@
 import csv
 import io
 import json
+from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from prometheus_client import Counter, Histogram, generate_latest
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlmodel import Session, func, select
 
 from app.config import settings
 from app.db import Host, HostModel, Model, Probe, Scan, get_session, init_db
 from app.ingest import IngestService
+from app.masscan import MasscanService
 from app.probe import ProbeService
 from app.schemas import (
     HealthResponse,
@@ -872,3 +876,419 @@ async def get_recent_probe_stats(
 @app.get("/metrics")
 async def metrics():
     return Response(content=generate_latest(), media_type="text/plain")
+
+
+class MasscanRequest(BaseModel):
+    target: str = "0.0.0.0/0"
+    port: str = "11434"
+    rate: int = 100000
+    router_mac: str = "00:21:59:a0:cf:c1"
+
+
+class MasscanResponse(BaseModel):
+    scan_id: int
+    status: str
+    message: str
+
+
+@app.post("/api/masscan", response_model=MasscanResponse)
+async def run_masscan(
+    request: MasscanRequest,
+    session: Session = Depends(get_session),
+):
+
+    service = MasscanService(session)
+
+    def run_in_background():
+        service.run_scan(
+            target=request.target,
+            port=request.port,
+            rate=request.rate,
+            router_mac=request.router_mac,
+        )
+
+    result = service.run_scan(
+        target=request.target,
+        port=request.port,
+        rate=request.rate,
+        router_mac=request.router_mac,
+    )
+
+    return MasscanResponse(
+        scan_id=result["scan_id"],
+        status="started",
+        message=f"Masscan started. Output: {result['output_file']}",
+    )
+
+
+@app.get("/api/masscan/{scan_id}")
+async def get_masscan_status(
+    scan_id: int,
+    session: Session = Depends(get_session),
+):
+    service = MasscanService(session)
+    return service.get_progress(scan_id)
+
+
+@app.post("/api/masscan/{scan_id}/ingest")
+async def ingest_masscan_results(
+    scan_id: int,
+    session: Session = Depends(get_session),
+):
+    service = MasscanService(session)
+    results_file = service.get_results_file(scan_id)
+
+    if not results_file:
+        raise HTTPException(status_code=404, detail="Scan results not found")
+
+    with open(results_file) as f:
+        content = f.read()
+
+    output_file = f"/workspace/imports/masscan-{scan_id}.txt"
+    with open(output_file, "w") as f:
+        for line in content.split("\n"):
+            if '"ip":' in line:
+                import re
+
+                ip_match = re.search(r'"ip":\s*"([^"]+)"', line)
+                if ip_match:
+                    f.write(f"{ip_match.group(1)}:11434\n")
+
+    scan = session.get(Scan, scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+
+    scan.source_file = f"masscan-ingest:{scan_id}"
+    session.commit()
+
+    from app.ingest import IngestService
+
+    ingest_service = IngestService(session)
+
+    with open(output_file, "rb") as file_content:
+        records = list(ingest_service.parse_stream(file_content.read(), {}))
+        success, failed = ingest_service.process_batch(records, scan_id)
+
+    return {
+        "scan_id": scan_id,
+        "hosts_ingested": success,
+        "hosts_failed": failed,
+    }
+
+
+# ── ACO masscan block scheduler ──────────────────────────────────────────────
+
+import logging  # noqa: E402
+
+from app.ingest import IngestService as _IngestService  # noqa: E402
+from app.masscan_aco import ACOMasscanScheduler, BlockScanResult  # noqa: E402
+
+_aco_logger = logging.getLogger("aco_scheduler")
+_aco_scheduler: ACOMasscanScheduler | None = None
+
+
+def _on_aco_block_result(result: BlockScanResult) -> None:
+    """Ingest ACO block scan results automatically."""
+    if not result.success or result.hosts_found == 0:
+        return
+    try:
+        from app.db import get_session as _get_session
+
+        with next(_get_session()) as session:
+            ingest = _IngestService(session)
+            with open(result.output_file, "rb") as f:
+                records = list(ingest.parse_stream(f.read(), {}))
+                if records:
+                    scan = Scan(
+                        source_file=f"aco-block:{result.cidr}",
+                        mapping_json="{}",
+                        status="processing",
+                    )
+                    session.add(scan)
+                    session.commit()
+                    session.refresh(scan)
+                    success, failed = ingest.process_batch(records, scan.id or 0)
+                    scan.status = "completed"
+                    scan.total_rows = len(records)
+                    scan.processed_rows = success
+                    scan.stats_json = json.dumps(
+                        {"success": success, "failed": failed, "cidr": result.cidr}
+                    )
+                    session.commit()
+                    _aco_logger.info("ACO block %s ingested: %d hosts", result.cidr, success)
+    except Exception as e:
+        _aco_logger.error("ACO block ingest failed for %s: %s", result.cidr, e)
+
+
+def _aco_not_running_snapshot() -> dict:
+    return {
+        "status": "not_running",
+        "started_at": None,
+        "uptime_seconds": None,
+        "prefix_len": None,
+        "estimated_block_duration_s": None,
+        "config": None,
+        "stats": {
+            "total_blocks": 0,
+            "scanned_blocks": 0,
+            "unscanned_blocks": 0,
+            "total_yield": 0,
+            "avg_pheromone": 0,
+        },
+        "current_job": None,
+        "recent_results": [],
+        "top_blocks": [],
+        "last_error": None,
+    }
+
+
+def _get_aco_history(session: Session, limit: int = 20) -> list[dict]:
+    scans = session.exec(
+        select(Scan)
+        .where(Scan.source_file.like("aco-block:%"))
+        .order_by(Scan.started_at.desc())
+        .limit(limit)
+    ).all()
+
+    history = []
+    for scan in scans:
+        stats = scan.stats
+        cidr = stats.get("cidr")
+        if not cidr and scan.source_file.startswith("aco-block:"):
+            cidr = scan.source_file.split(":", 1)[1]
+
+        history.append(
+            {
+                "scan_id": scan.id,
+                "cidr": cidr,
+                "status": scan.status,
+                "started_at": scan.started_at.isoformat() if scan.started_at else None,
+                "completed_at": scan.completed_at.isoformat() if scan.completed_at else None,
+                "hosts_found": stats.get("success", scan.processed_rows),
+                "failed_rows": stats.get("failed", 0),
+                "processed_rows": scan.processed_rows,
+                "error_message": scan.error_message,
+            }
+        )
+
+    return history
+
+
+def _get_host_geography(session: Session, limit: int = 20) -> dict:
+    country_rows = session.exec(
+        select(Host.geo_country, func.count(Host.id))
+        .where(Host.geo_country.is_not(None), Host.geo_country != "")
+        .group_by(Host.geo_country)
+        .order_by(func.count(Host.id).desc())
+        .limit(limit)
+    ).all()
+
+    known_hosts = session.exec(
+        select(func.count())
+        .select_from(Host)
+        .where(Host.geo_country.is_not(None), Host.geo_country != "")
+    ).one()
+    unknown_hosts = session.exec(
+        select(func.count())
+        .select_from(Host)
+        .where(or_(Host.geo_country.is_(None), Host.geo_country == ""))
+    ).one()
+
+    return {
+        "known_hosts": known_hosts,
+        "unknown_hosts": unknown_hosts,
+        "countries": [
+            {
+                "country": country,
+                "count": count,
+            }
+            for country, count in country_rows
+            if country
+        ],
+    }
+
+
+@app.get("/api/aco/dashboard")
+async def get_aco_dashboard(
+    history_limit: int = Query(default=20, ge=1, le=100),
+    country_limit: int = Query(default=25, ge=1, le=100),
+    session: Session = Depends(get_session),
+):
+    scheduler = (
+        _aco_scheduler.dashboard_snapshot(result_limit=history_limit, block_limit=20)
+        if _aco_scheduler
+        else _aco_not_running_snapshot()
+    )
+
+    return {
+        "status": scheduler["status"],
+        "scheduler": scheduler,
+        "history": _get_aco_history(session, history_limit),
+        "geography": _get_host_geography(session, country_limit),
+    }
+
+
+def _read_log_file(log_path: str, max_lines: int = 200) -> str | None:
+    """Read last N lines of a log file safely (most recent progress)."""
+    try:
+        p = Path(log_path)
+        if not p.exists():
+            print(f"[DEBUG] log file does not exist: {log_path}")
+            return None
+        content = p.read_text(errors="replace")
+        all_lines = content.splitlines()
+        last_lines = all_lines[-max_lines:] if len(all_lines) > max_lines else all_lines
+        return "\n".join(last_lines)
+    except Exception as e:
+        print(f"[DEBUG] exception reading log file {log_path}: {e}")
+        return None
+
+
+@app.get("/api/aco/logs/current")
+async def get_aco_current_logs(lines: int = Query(default=200, ge=1, le=2000)):
+    """Get logs for the currently running scan, if any."""
+    if not _aco_scheduler:
+        return {"status": "not_running", "logs": None}
+
+    with _aco_scheduler._state_lock:
+        current = _aco_scheduler.current_job
+        if not current:
+            return {
+                "status": "idle",
+                "message": "No scan currently running",
+                "last_error": _aco_scheduler.last_error,
+                "logs": None,
+            }
+
+        log_path = current.log_file
+        scan_info = {
+            "cidr": current.cidr,
+            "scan_uuid": current.scan_uuid,
+            "started_at": current.started_at.isoformat(),
+            "port": current.port,
+            "rate": current.rate,
+            "estimated_duration_s": current.estimated_duration_s,
+        }
+
+    content = _read_log_file(log_path, lines)
+    return {
+        "status": "running",
+        "scan": scan_info,
+        "log_file": log_path,
+        "lines": lines,
+        "logs": content,
+    }
+
+
+@app.get("/api/aco/logs/{scan_uuid}")
+async def get_aco_scan_logs(scan_uuid: str, lines: int = Query(default=200, ge=1, le=2000)):
+    """Get logs for a specific scan by UUID."""
+    if not _aco_scheduler:
+        raise HTTPException(status_code=503, detail="ACO scheduler not running")
+
+    with _aco_scheduler._state_lock:
+        current = _aco_scheduler.current_job
+        if current and current.scan_uuid == scan_uuid:
+            log_path = current.log_file
+        else:
+            for result in _aco_scheduler.recent_results:
+                if result.scan_uuid == scan_uuid:
+                    log_path = result.log_file
+                    break
+            else:
+                log_path = None
+
+    if not log_path:
+        raise HTTPException(status_code=404, detail=f"No logs found for scan {scan_uuid}")
+
+    content = _read_log_file(log_path, lines)
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"Log file not found: {log_path}")
+
+    return {"scan_uuid": scan_uuid, "log_file": log_path, "lines": lines, "content": content}
+
+
+@app.post("/api/aco/scan/start")
+async def start_aco_scan():
+    """Start the ACO-guided masscan block scanner."""
+    global _aco_scheduler
+    if _aco_scheduler:
+        snapshot = _aco_scheduler.dashboard_snapshot(result_limit=10, block_limit=10)
+        if snapshot["status"] != "stopped":
+            return {"status": "already_running", "scheduler": snapshot}
+        _aco_scheduler = None
+
+    _aco_scheduler = ACOMasscanScheduler(
+        on_result=_on_aco_block_result,
+    )
+    _aco_scheduler.start()
+    return {
+        "status": "started",
+        "scheduler": _aco_scheduler.dashboard_snapshot(result_limit=10, block_limit=10),
+    }
+
+
+@app.post("/api/aco/scan/stop")
+async def stop_aco_scan():
+    """Stop the ACO-guided masscan block scanner."""
+    global _aco_scheduler
+    if not _aco_scheduler:
+        return {"status": "not_running"}
+
+    fully_stopped = _aco_scheduler.stop()
+    snapshot = _aco_scheduler.dashboard_snapshot(result_limit=10, block_limit=10)
+    if fully_stopped:
+        _aco_scheduler = None
+        return {"status": "stopped", "scheduler": snapshot}
+
+    return {"status": "stop_requested", "scheduler": snapshot}
+
+
+@app.get("/api/aco/scan/stats")
+async def get_aco_scan_stats():
+    """Get ACO scanner stats."""
+    if not _aco_scheduler:
+        return {"status": "not_running"}
+    snapshot = _aco_scheduler.dashboard_snapshot(result_limit=5, block_limit=10)
+    return {
+        "status": snapshot["status"],
+        "stats": snapshot["stats"],
+        "current_job": snapshot["current_job"],
+        "started_at": snapshot["started_at"],
+        "uptime_seconds": snapshot["uptime_seconds"],
+        "last_error": snapshot["last_error"],
+    }
+
+
+@app.get("/api/aco/scan/blocks")
+async def get_aco_top_blocks(n: int = Query(default=20, ge=1, le=100)):
+    """Get top N blocks by ACO pheromone score."""
+    if not _aco_scheduler:
+        return {"status": "not_running", "blocks": []}
+    snapshot = _aco_scheduler.dashboard_snapshot(result_limit=0, block_limit=n)
+    return {"status": snapshot["status"], "blocks": snapshot["top_blocks"]}
+
+
+@app.post("/api/aco/scan/one")
+async def scan_one_block():
+    """Run a single ACO-selected block scan (manual)."""
+    if not _aco_scheduler:
+        raise HTTPException(status_code=400, detail="ACO scheduler not running")
+
+    try:
+        result = _aco_scheduler.scan_one_block()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    if not result:
+        return {"status": "no_eligible_blocks"}
+
+    return {
+        "status": "completed" if result.success else "failed",
+        "cidr": result.cidr,
+        "hosts_found": result.hosts_found,
+        "duration_ms": round(result.duration_ms),
+        "started_at": result.started_at.isoformat(),
+        "completed_at": result.completed_at.isoformat(),
+        "error": result.error,
+    }
