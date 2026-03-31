@@ -28,7 +28,7 @@ interface ProjectedHostPoint extends HostPoint {
 
 const numberFormatter = new Intl.NumberFormat()
 const BASE_MAP_WIDTH = 960
-const MAP_HEIGHT_RATIO = 3 / 4
+const MAP_HEIGHT_RATIO = 0.7
 const INNER_TRANSLATE_Y = 240
 const MIN_MAP_WIDTH = 320
 
@@ -130,7 +130,7 @@ export default function ScannerWorldMap({
         </div>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 lg:grid-cols-3">
         <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900/50">
           <p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Geocoded Hosts</p>
           <p className="mt-2 text-2xl font-semibold text-gray-900 dark:text-white">
@@ -156,8 +156,8 @@ export default function ScannerWorldMap({
       </div>
 
       {mapData.length > 0 ? (
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_17rem]">
-          <div className="overflow-hidden rounded-xl border border-gray-200 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-3 dark:border-gray-700">
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.55fr)_18rem]">
+          <div className="overflow-hidden rounded-xl border border-gray-200 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 p-4 dark:border-gray-700">
             <div ref={mapStageRef} className="relative w-full min-w-0 overflow-hidden">
               <WorldMap
                 color="#60a5fa"

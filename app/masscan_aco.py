@@ -104,11 +104,17 @@ class SchedulerConfig:
     max_block_duration_s: float = 120.0  # timeout buffer (target is ~60s)
     min_scan_interval_s: float = 3600.0  # don't re-scan within 1 hour
     results_dir: str = "/workspace/imports/masscan"
-    exclude_file: str = "/app/excludes.conf"
+    exclude_file: str = os.environ.get(
+        "OUR_GPUS_EXCLUDE_FILES",
+        "/app/excludes.conf,/app/excludes.generated.conf",
+    )
     router_mac: str = "00:21:59:a0:cf:c1"
     interface: str = os.environ.get("MASSCAN_INTERFACE", "eth0")
     state_file: str = "/workspace/imports/masscan/aco-state.json"
     breathing_room_s: float = 2.0  # pause between blocks
+    strategy: str = os.environ.get("OUR_GPUS_DEFAULT_STRATEGY", "tor-connect")
+    tor_max_hosts: int = int(os.environ.get("TOR_SCAN_MAX_HOSTS", "4096"))
+    tor_concurrency: int = int(os.environ.get("TOR_SCAN_CONCURRENCY", "32"))
 
     # ACO tuning
     aco_alpha: float = 0.6
@@ -151,20 +157,37 @@ class ACOMasscanScheduler:
         )
         self.aco = AntColony(aco_config)
 
-        # Determine optimal prefix for target duration
-        self.prefix_len = optimal_prefix_for_target_duration(
-            target_seconds=self.config.max_block_duration_s,
-            rate=self.config.rate,
-        )
-        self.estimated_block_duration_s = estimate_scan_duration(
-            1 << (32 - self.prefix_len),
-            self.config.rate,
-        )
+        # Determine optimal prefix based on strategy
+        # For tor-connect, we must respect the host cap (default 4096)
+        # /20 = 4096 hosts, /21 = 2048, /22 = 1024
+        from app.masscan import TOR_CONNECT_STRATEGY, normalize_scan_strategy_name
+
+        strategy_name = normalize_scan_strategy_name(self.config.strategy)
+        if strategy_name == TOR_CONNECT_STRATEGY:
+            # Use /21 blocks (2048 hosts) to stay safely under 4096 cap after exclusions
+            self.prefix_len = 21
+            self.estimated_block_duration_s = estimate_scan_duration(
+                1 << (32 - self.prefix_len),
+                self.config.rate,
+            )
+        else:
+            # For masscan/shodan, use duration-based calculation
+            self.prefix_len = optimal_prefix_for_target_duration(
+                target_seconds=self.config.max_block_duration_s,
+                rate=self.config.rate,
+            )
+            self.estimated_block_duration_s = estimate_scan_duration(
+                1 << (32 - self.prefix_len),
+                self.config.rate,
+            )
+
         logger.info(
-            "ACO scheduler: prefix_len=%d (~%ds per block at %d rate)",
+            "ACO scheduler: prefix_len=%d (~%d hosts per block, ~%ds at %d rate) strategy=%s",
             self.prefix_len,
+            1 << (32 - self.prefix_len),
             round(self.estimated_block_duration_s),
             self.config.rate,
+            strategy_name,
         )
 
         # Blocks loaded lazily in _scan_loop
@@ -324,6 +347,15 @@ class ACOMasscanScheduler:
                 "rate": self.config.rate,
                 "max_block_duration_s": self.config.max_block_duration_s,
                 "min_scan_interval_s": self.config.min_scan_interval_s,
+                "breathing_room_s": self.config.breathing_room_s,
+                "router_mac": self.config.router_mac,
+                "interface": self.config.interface,
+                "exclude_file": self.config.exclude_file,
+                "aco_alpha": self.config.aco_alpha,
+                "aco_beta": self.config.aco_beta,
+                "aco_decay": self.config.aco_decay,
+                "aco_reinforcement": self.config.aco_reinforcement,
+                "aco_penalty": self.config.aco_penalty,
             },
             "stats": stats,
             "current_job": current_job,
@@ -414,34 +446,23 @@ class ACOMasscanScheduler:
                     eligible.append(block_key)
         return eligible
 
-    def _run_masscan_block(self, cidr: str) -> BlockScanResult:
-        """Run masscan against a single CIDR block."""
+    def _run_scan_block(self, cidr: str) -> BlockScanResult:
+        """Run scan against a single CIDR block using configured strategy."""
+        from app.masscan import (
+            ScanService,
+            ScanRequest,
+            ScanContext,
+            normalize_scan_strategy_name,
+        )
+        from app.db import get_session
+
         Path(self.config.results_dir).mkdir(parents=True, exist_ok=True)
         scan_uuid = str(uuid.uuid4())[:8]
-        output_file = f"{self.config.results_dir}/block-{scan_uuid}.json"
+        output_file = f"{self.config.results_dir}/block-{scan_uuid}.txt"
         log_file = f"{self.config.results_dir}/block-{scan_uuid}.log"
         started_at = datetime.utcnow()
 
-        cmd = [
-            "masscan",
-            cidr,
-            "-p",
-            self.config.port,
-            "--interface",
-            self.config.interface,
-            "--rate",
-            str(self.config.rate),
-            "--exclude-file",
-            self.config.exclude_file,
-            "--router-mac",
-            self.config.router_mac,
-            "-oJ",
-            output_file,
-            "--wait",
-            "10",
-            "--retries",
-            "2",
-        ]
+        strategy_name = normalize_scan_strategy_name(self.config.strategy)
 
         with self._state_lock:
             self.current_job = CurrentScanJob(
@@ -458,36 +479,48 @@ class ACOMasscanScheduler:
         start_ms = time.time() * 1000
         success = True
         error_msg = None
+        hosts_found = 0
 
         try:
-            with open(log_file, "w") as log:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
+            engine = __import__("app.db", fromlist=["engine"]).engine
+            from sqlmodel import Session
+
+            with Session(engine) as session:
+                service = ScanService(session)
+                service.exclude_file = self.config.exclude_file
+                service.results_dir = Path(self.config.results_dir)
+
+                request = ScanRequest(
+                    target=cidr,
+                    port=self.config.port,
+                    rate=self.config.rate,
+                    router_mac=self.config.router_mac,
+                    strategy=strategy_name,
+                    tor_max_hosts=self.config.tor_max_hosts,
+                    tor_concurrency=self.config.tor_concurrency,
                 )
-                try:
-                    process.wait(timeout=self.config.max_block_duration_s + 30)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    success = False
-                    error_msg = f"timeout after {self.config.max_block_duration_s}s"
+
+                context = service._build_context(request)
+                result = service._strategies[strategy_name].execute(context)
+                hosts_found = result.discovered_hosts
+
+                Path(log_file).write_text(
+                    f"strategy={strategy_name}\n"
+                    f"target={cidr}\n"
+                    f"port={self.config.port}\n"
+                    f"attempted_hosts={result.attempted_hosts}\n"
+                    f"discovered_hosts={hosts_found}\n"
+                )
+
         except Exception as e:
             success = False
             error_msg = str(e)
+            Path(log_file).write_text(
+                f"strategy={strategy_name}\ntarget={cidr}\nerror={error_msg}\n"
+            )
 
         duration_ms = (time.time() * 1000) - start_ms
         completed_at = datetime.utcnow()
-
-        # Count hosts found
-        hosts_found = 0
-        try:
-            with open(output_file) as f:
-                for line in f:
-                    if '"ip":' in line:
-                        hosts_found += 1
-        except FileNotFoundError:
-            pass
 
         result = BlockScanResult(
             cidr=cidr,
@@ -507,6 +540,10 @@ class ACOMasscanScheduler:
             self.recent_results.appendleft(result)
 
         return result
+
+    def _run_masscan_block(self, cidr: str) -> BlockScanResult:
+        """Run scan against a single CIDR block (uses configured strategy, not raw masscan)."""
+        return self._run_scan_block(cidr)
 
     def _save_state(self) -> None:
         """Persist ACO state to disk."""

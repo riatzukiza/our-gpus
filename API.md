@@ -12,6 +12,39 @@ Currently no authentication required (add in production).
 
 ## Endpoints
 
+### Scanning
+
+#### POST /api/masscan
+
+Start a scan job using one of the supported scan strategies.
+
+**Request Body**:
+```json
+{
+  "strategy": "masscan",
+  "target": "0.0.0.0/0",
+  "port": "11434",
+  "rate": 100000,
+  "router_mac": "00:21:59:a0:cf:c1"
+}
+```
+
+Supported strategies:
+- `masscan`: raw packet scan, blocked when Tor mode requires fail-closed egress
+- `tor`: HTTP/Tor discovery scan, intended for smaller exclusion-filtered target sets
+
+**Response**:
+```json
+{
+  "scan_id": 42,
+  "status": "started",
+  "strategy": "tor",
+  "message": "tor scan started. Output: /workspace/imports/masscan/scan-abcd1234.txt"
+}
+```
+
+Both strategies refuse to run if `excludes.conf` is missing or empty.
+
 ### Ingestion
 
 #### POST /api/ingest

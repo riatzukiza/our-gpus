@@ -19,14 +19,14 @@ dev:
 	@echo "  API Docs: http://localhost:8000/docs"
 
 test:
-	pytest tests/ -v --cov=app --cov=worker --cov-report=term-missing
+	uv run pytest tests/ -v --cov=app --cov=worker --cov-report=term-missing
 
 lint:
-	ruff check app/ worker/ cli/ tests/
+	uv run ruff check app/ worker/ cli/ tests/
 	cd web && bun run lint
 
 fmt:
-	ruff format app/ worker/ cli/ tests/
+	uv run ruff format app/ worker/ cli/ tests/
 	cd web && bun run format
 
 build:
@@ -43,7 +43,7 @@ ingest:
 		echo "Usage: make ingest file=path/to/data.json"; \
 		exit 1; \
 	fi
-	python cli/ingest_json.py $(file) --auto-detect
+	uv run python cli/ingest_json.py $(file) --auto-detect
 
 probe:
 	@if [ -z "$(filter)" ]; then \
@@ -51,18 +51,21 @@ probe:
 		echo "Options: --all, --status=online, --model=llama, --gpu"; \
 		exit 1; \
 	fi
-	python cli/rescan_hosts.py $(filter)
+	uv run python cli/rescan_hosts.py $(filter)
 
 install:
-	pip install -r requirements.txt
+	uv sync --dev
 	cd web && bun install
+
+refresh-excludes:
+	uv run python cli/refresh_dynamic_excludes.py --output app/excludes.generated.conf
 
 migrate:
 	alembic upgrade head
 
 seed:
 	@echo "Seeding sample data..."
-	python scripts/seed_sample.py
+	uv run python scripts/seed_sample.py
 
 logs:
 	docker compose logs -f

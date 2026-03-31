@@ -1,27 +1,46 @@
 import csv
+import hashlib
 import io
 import json
+import os
 import secrets
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 
 from celery.result import AsyncResult
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Header, Query, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from prometheus_client import Counter, Histogram, generate_latest
 from pydantic import BaseModel
 from sqlalchemy import or_
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, func, select
 
+from app.cidr_split import load_exclude_list
 from app.config import settings
-from app.db import Host, HostModel, Model, Probe, Scan, TaskJob, get_session, init_db
+from app.db import (
+    Host,
+    HostGroup,
+    HostGroupMember,
+    HostModel,
+    Model,
+    Probe,
+    Scan,
+    TaskJob,
+    Workflow,
+    WorkflowStageReceipt,
+    get_session,
+    init_db,
+)
 from app.ingest import IngestService
-from app.masscan import MasscanService
+from app.masscan import TOR_CONNECT_STRATEGY, ScanService
 from app.probe import ProbeService
 from app.schemas import (
     HealthResponse,
+    HostGroupCreateRequest,
+    HostGroupResponse,
+    HostGroupUpdateRequest,
     HostResponse,
     IngestResponse,
     ModelResponse,
@@ -30,7 +49,11 @@ from app.schemas import (
     PromptRequest,
     PromptResponse,
     ScanResponse,
+    WorkflowDetailResponse,
+    WorkflowReceiptResponse,
+    WorkflowResponse,
 )
+from app.shodan_queries import build_shodan_query_plan
 from worker.celery_app import celery_app
 from worker.tasks import register_task_job
 
@@ -96,6 +119,90 @@ def _serialize_task_job(job: TaskJob) -> dict:
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
     }
+
+
+def _serialize_workflow_receipt(receipt: WorkflowStageReceipt) -> WorkflowReceiptResponse:
+    return WorkflowReceiptResponse(
+        receipt_id=receipt.receipt_id,
+        workflow_id=receipt.workflow_id,
+        stage_name=receipt.stage_name,
+        status=receipt.status,
+        operator_id=receipt.operator_id,
+        input_refs=receipt.input_refs,
+        output_refs=receipt.output_refs,
+        metrics=receipt.metrics,
+        evidence_refs=receipt.evidence_refs,
+        policy_decisions=receipt.policy_decisions,
+        error=receipt.error,
+        started_at=receipt.started_at,
+        finished_at=receipt.finished_at,
+    )
+
+
+def _serialize_workflow(workflow: Workflow) -> WorkflowResponse:
+    return WorkflowResponse(
+        workflow_id=workflow.workflow_id,
+        scan_id=workflow.scan_id,
+        workflow_kind=workflow.workflow_kind,
+        target=workflow.target,
+        port=workflow.port,
+        strategy=workflow.strategy,
+        status=workflow.status,
+        current_stage=workflow.current_stage,
+        operator_id=workflow.operator_id,
+        exclude_snapshot_hash=workflow.exclude_snapshot_hash,
+        policy_snapshot_hash=workflow.policy_snapshot_hash,
+        parent_workflow_id=workflow.parent_workflow_id,
+        requested_config=workflow.requested_config,
+        summary=workflow.summary,
+        last_error=workflow.last_error,
+        created_at=workflow.created_at,
+        started_at=workflow.started_at,
+        completed_at=workflow.completed_at,
+    )
+
+
+def _apply_host_filters(
+    query,
+    *,
+    model=None,
+    family=None,
+    gpu=None,
+    status=None,
+    country=None,
+    system=None,
+    group_id=None,
+):
+    needs_model_join = bool(model or family)
+    if needs_model_join:
+        query = query.join(HostModel).join(Model)
+
+    if model:
+        query = query.where(Model.name.contains(model))
+    if family:
+        query = query.where(Model.family == family)
+    if gpu is not None:
+        if gpu:
+            query = query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
+        else:
+            query = query.where(
+                (Host.gpu.is_(None)) & ((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb.is_(None)))
+            )
+    if status:
+        query = query.where(Host.status == status)
+    if country:
+        query = query.where(Host.geo_country == country)
+    if system:
+        if system == "gpu":
+            query = query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
+        elif system == "cpu":
+            query = query.where(
+                (Host.gpu.is_(None)) & ((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb.is_(None)))
+            )
+    if group_id is not None:
+        query = query.join(HostGroupMember).where(HostGroupMember.group_id == group_id)
+
+    return query
 
 
 def _inspect_workers() -> dict:
@@ -236,6 +343,7 @@ async def get_scan(scan_id: int, session: Session = Depends(get_session)):
 
     return ScanResponse(
         id=scan.id,
+        workflow_id=scan.mapping.get("workflow_id"),
         source_file=scan.source_file,
         status=scan.status,
         started_at=scan.started_at,
@@ -245,6 +353,41 @@ async def get_scan(scan_id: int, session: Session = Depends(get_session)):
         mapping=scan.mapping,
         stats=scan.stats,
         error_message=scan.error_message,
+    )
+
+
+@app.get("/api/admin/workflows", response_model=list[WorkflowResponse])
+async def list_workflows(
+    limit: int = Query(default=50, ge=1, le=200),
+    _: None = Depends(require_admin_api_key),
+    session: Session = Depends(get_session),
+):
+    workflows = session.exec(
+        select(Workflow).order_by(Workflow.created_at.desc()).limit(limit)
+    ).all()
+    return [_serialize_workflow(workflow) for workflow in workflows]
+
+
+@app.get("/api/admin/workflows/{workflow_id}", response_model=WorkflowDetailResponse)
+async def get_workflow(
+    workflow_id: str,
+    _: None = Depends(require_admin_api_key),
+    session: Session = Depends(get_session),
+):
+    workflow = session.get(Workflow, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    receipts = session.exec(
+        select(WorkflowStageReceipt)
+        .where(WorkflowStageReceipt.workflow_id == workflow_id)
+        .order_by(WorkflowStageReceipt.started_at.asc())
+    ).all()
+
+    workflow_response = _serialize_workflow(workflow)
+    return WorkflowDetailResponse(
+        **workflow_response.model_dump(),
+        receipts=[_serialize_workflow_receipt(receipt) for receipt in receipts],
     )
 
 
@@ -413,6 +556,157 @@ async def get_admin_jobs(
     }
 
 
+class MasscanRequest(BaseModel):
+    target: str = "0.0.0.0/0"
+    port: str = "11434"
+    rate: int = 100000
+    router_mac: str = "00:21:59:a0:cf:c1"
+    strategy: str = TOR_CONNECT_STRATEGY
+    tor_max_hosts: int | None = None
+    tor_concurrency: int | None = None
+    shodan_query: str | None = None
+    shodan_page_limit: int | None = None
+    shodan_max_matches: int | None = None
+    shodan_max_queries: int | None = None
+    shodan_query_max_length: int | None = None
+
+
+class MasscanResponse(BaseModel):
+    scan_id: int
+    status: str
+    message: str
+    strategy: str
+
+
+class ACOStartRequest(BaseModel):
+    port: str | None = None
+    rate: int | None = None
+    max_block_duration_s: float | None = None
+    min_scan_interval_s: float | None = None
+    breathing_room_s: float | None = None
+    router_mac: str | None = None
+    interface: str | None = None
+    aco_alpha: float | None = None
+    aco_beta: float | None = None
+    aco_decay: float | None = None
+    aco_reinforcement: float | None = None
+    aco_penalty: float | None = None
+
+
+class ShodanQueryPlanRequest(BaseModel):
+    target: str = "0.0.0.0/0"
+    port: str = "11434"
+    base_query: str = ""
+    max_query_length: int = 900
+    max_queries: int = 24
+
+
+def _serialize_scheduler_config(config) -> dict:
+    return {
+        "port": config.port,
+        "rate": config.rate,
+        "max_block_duration_s": config.max_block_duration_s,
+        "min_scan_interval_s": config.min_scan_interval_s,
+        "breathing_room_s": config.breathing_room_s,
+        "router_mac": config.router_mac,
+        "interface": config.interface,
+        "exclude_file": config.exclude_file,
+        "aco_alpha": config.aco_alpha,
+        "aco_beta": config.aco_beta,
+        "aco_decay": config.aco_decay,
+        "aco_reinforcement": config.aco_reinforcement,
+        "aco_penalty": config.aco_penalty,
+    }
+
+
+@app.get("/api/admin/scanner/config")
+async def get_admin_scanner_config(_: None = Depends(require_admin_api_key)):
+    from app.masscan_aco import SchedulerConfig
+
+    current = _aco_scheduler.config if _aco_scheduler else SchedulerConfig()
+    return {
+        "aco": _serialize_scheduler_config(current),
+        "tor": {
+            "max_hosts": settings.tor_scan_max_hosts,
+            "concurrency": settings.tor_scan_concurrency,
+        },
+        "shodan": {
+            "api_key_configured": bool(settings.shodan_api_key),
+            "base_query": settings.shodan_base_query,
+            "page_limit": settings.shodan_page_limit,
+            "max_matches": settings.shodan_max_matches,
+            "max_queries": settings.shodan_max_queries,
+            "query_max_length": settings.shodan_query_max_length,
+        },
+        "scan": {
+            "target": "0.0.0.0/0",
+            "port": "11434",
+            "rate": 100000,
+            "router_mac": "00:21:59:a0:cf:c1",
+            "strategy": TOR_CONNECT_STRATEGY,
+        },
+    }
+
+
+@app.post("/api/admin/scanner/query-plan")
+async def get_admin_shodan_query_plan(
+    request: ShodanQueryPlanRequest,
+    _: None = Depends(require_admin_api_key),
+):
+    plan = build_shodan_query_plan(
+        target=request.target,
+        port=request.port,
+        exclude_files=settings.our_gpus_exclude_files,
+        base_query=request.base_query,
+        max_query_length=request.max_query_length,
+        max_queries=request.max_queries,
+    )
+    return {
+        "base_query": plan.base_query,
+        "target": plan.target,
+        "port": plan.port,
+        "query_count": len(plan.queries),
+        "queries": plan.queries,
+        "total_excludes": plan.total_excludes,
+        "applied_excludes": plan.applied_excludes,
+        "omitted_excludes": plan.omitted_excludes,
+        "max_query_length": plan.max_query_length,
+    }
+
+
+@app.post("/api/admin/scanner/run", response_model=MasscanResponse)
+async def run_admin_scan(
+    request: MasscanRequest,
+    _: None = Depends(require_admin_api_key),
+    session: Session = Depends(get_session),
+):
+    service = ScanService(session)
+    try:
+        result = service.run_scan(
+            target=request.target,
+            port=request.port,
+            rate=request.rate,
+            router_mac=request.router_mac,
+            strategy=request.strategy,
+            tor_max_hosts=request.tor_max_hosts,
+            tor_concurrency=request.tor_concurrency,
+            shodan_query=request.shodan_query,
+            shodan_page_limit=request.shodan_page_limit,
+            shodan_max_matches=request.shodan_max_matches,
+            shodan_max_queries=request.shodan_max_queries,
+            shodan_query_max_length=request.shodan_query_max_length,
+        )
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+    return MasscanResponse(
+        scan_id=result["scan_id"],
+        status="started",
+        message=f"{result['strategy']} scan started. Output: {result['output_file']}",
+        strategy=result["strategy"],
+    )
+
+
 @app.get("/api/hosts", response_model=PaginatedHostResponse)
 async def list_hosts(
     page: int = Query(1, ge=1),
@@ -421,30 +715,22 @@ async def list_hosts(
     family: str | None = None,
     gpu: bool | None = None,
     status: str | None = None,
+    country: str | None = None,
+    system: str | None = None,
+    group_id: int | None = None,
     sort: str = "last_seen",
     session: Session = Depends(get_session),
 ):
-    # Build base query for counting
-    base_query = select(Host)
-
-    # Apply filters - handle joins carefully to avoid duplicates
-    needs_model_join = bool(model or family)
-    if needs_model_join:
-        base_query = base_query.join(HostModel).join(Model)
-
-    if model:
-        base_query = base_query.where(Model.name.contains(model))
-    if family:
-        base_query = base_query.where(Model.family == family)
-    if gpu is not None:
-        if gpu:
-            base_query = base_query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
-        else:
-            base_query = base_query.where(
-                (Host.gpu.is_(None)) & ((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb.is_(None)))
-            )
-    if status:
-        base_query = base_query.where(Host.status == status)
+    base_query = _apply_host_filters(
+        select(Host),
+        model=model,
+        family=family,
+        gpu=gpu,
+        status=status,
+        country=country,
+        system=system,
+        group_id=group_id,
+    )
 
     # Get total count
     count_query = select(func.count()).select_from(base_query.subquery())
@@ -471,6 +757,12 @@ async def list_hosts(
         ).all()
 
         model_names = [m.name for hm, m in host_models]
+        group_names = session.exec(
+            select(HostGroup.name)
+            .join(HostGroupMember, HostGroup.id == HostGroupMember.group_id)
+            .where(HostGroupMember.host_id == h.id)
+            .order_by(HostGroup.name)
+        ).all()
 
         result.append(
             HostResponse(
@@ -483,6 +775,9 @@ async def list_hosts(
                 api_version=h.api_version,
                 gpu=h.gpu,
                 gpu_vram_mb=h.gpu_vram_mb,
+                geo_country=h.geo_country,
+                geo_city=h.geo_city,
+                groups=group_names,
                 models=model_names,
             )
         )
@@ -493,63 +788,6 @@ async def list_hosts(
         page=page,
         size=size,
         pages=(total + size - 1) // size,  # Calculate total pages
-    )
-
-
-@app.get("/api/hosts/{host_id}", response_model=HostResponse)
-async def get_host(host_id: int, session: Session = Depends(get_session)):
-    host = session.get(Host, host_id)
-    if not host:
-        raise HTTPException(404, "Host not found")
-
-    # Get latest probe
-    latest_probe = session.exec(
-        select(Probe).where(Probe.host_id == host_id).order_by(Probe.created_at.desc()).limit(1)
-    ).first()
-
-    # Get models for this host
-    host_models = session.exec(
-        select(HostModel, Model).join(Model).where(HostModel.host_id == host_id)
-    ).all()
-
-    models = [
-        {
-            "name": m.name,
-            "family": m.family,
-            "parameters": m.parameters,
-            "loaded": hm.loaded,
-            "vram_usage_mb": hm.vram_usage_mb,
-        }
-        for hm, m in host_models
-    ]
-
-    # Safely parse probe payload
-    last_probe_data = None
-    if latest_probe:
-        try:
-            last_probe_data = json.loads(latest_probe.raw_payload)
-        except json.JSONDecodeError:
-            # Handle truncated JSON
-            last_probe_data = {"error": "Probe data truncated"}
-
-    return HostResponse(
-        id=host.id,
-        ip=host.ip,
-        port=host.port,
-        status=host.status,
-        last_seen=host.last_seen,
-        first_seen=host.first_seen,
-        latency_ms=host.latency_ms,
-        api_version=host.api_version,
-        os=host.os,
-        arch=host.arch,
-        ram_gb=host.ram_gb,
-        gpu=host.gpu,
-        gpu_vram_mb=host.gpu_vram_mb,
-        geo_country=host.geo_country,
-        geo_city=host.geo_city,
-        models=models,
-        last_probe=last_probe_data,
     )
 
 
@@ -594,27 +832,224 @@ async def list_model_families(session: Session = Depends(get_session)):
     return {"families": families}
 
 
+@app.get("/api/hosts/countries")
+async def list_host_countries(session: Session = Depends(get_session)):
+    countries = session.exec(
+        select(Host.geo_country)
+        .where(Host.geo_country.is_not(None), Host.geo_country != "")
+        .group_by(Host.geo_country)
+        .order_by(Host.geo_country)
+    ).all()
+    return {"countries": countries}
+
+
+@app.get("/api/hosts/{host_id}", response_model=HostResponse)
+async def get_host(host_id: int, session: Session = Depends(get_session)):
+    host = session.get(Host, host_id)
+    if not host:
+        raise HTTPException(404, "Host not found")
+
+    latest_probe = session.exec(
+        select(Probe).where(Probe.host_id == host_id).order_by(Probe.created_at.desc()).limit(1)
+    ).first()
+
+    host_models = session.exec(
+        select(HostModel, Model).join(Model).where(HostModel.host_id == host_id)
+    ).all()
+
+    models = [
+        {
+            "name": m.name,
+            "family": m.family,
+            "parameters": m.parameters,
+            "loaded": hm.loaded,
+            "vram_usage_mb": hm.vram_usage_mb,
+        }
+        for hm, m in host_models
+    ]
+    group_names = session.exec(
+        select(HostGroup.name)
+        .join(HostGroupMember, HostGroup.id == HostGroupMember.group_id)
+        .where(HostGroupMember.host_id == host_id)
+        .order_by(HostGroup.name)
+    ).all()
+
+    last_probe_data = None
+    if latest_probe:
+        try:
+            last_probe_data = json.loads(latest_probe.raw_payload)
+        except json.JSONDecodeError:
+            last_probe_data = {"error": "Probe data truncated"}
+
+    return HostResponse(
+        id=host.id,
+        ip=host.ip,
+        port=host.port,
+        status=host.status,
+        last_seen=host.last_seen,
+        first_seen=host.first_seen,
+        latency_ms=host.latency_ms,
+        api_version=host.api_version,
+        os=host.os,
+        arch=host.arch,
+        ram_gb=host.ram_gb,
+        gpu=host.gpu,
+        gpu_vram_mb=host.gpu_vram_mb,
+        geo_country=host.geo_country,
+        geo_city=host.geo_city,
+        groups=group_names,
+        models=models,
+        last_probe=last_probe_data,
+    )
+
+
+@app.get("/api/admin/groups", response_model=list[HostGroupResponse])
+async def list_host_groups(
+    _: None = Depends(require_admin_api_key),
+    session: Session = Depends(get_session),
+):
+    groups = session.exec(select(HostGroup).order_by(HostGroup.name)).all()
+    result: list[HostGroupResponse] = []
+    for group in groups:
+        host_count = session.exec(
+            select(func.count(HostGroupMember.id)).where(HostGroupMember.group_id == group.id)
+        ).one()
+        result.append(
+            HostGroupResponse(
+                id=group.id,
+                name=group.name,
+                description=group.description,
+                country_filter=group.country_filter,
+                system_filter=group.system_filter,
+                host_count=host_count,
+                created_at=group.created_at,
+                updated_at=group.updated_at,
+            )
+        )
+    return result
+
+
+@app.post("/api/admin/groups", response_model=HostGroupResponse)
+async def create_host_group(
+    request: HostGroupCreateRequest,
+    _: None = Depends(require_admin_api_key),
+    session: Session = Depends(get_session),
+):
+    existing = session.exec(select(HostGroup).where(HostGroup.name == request.name)).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Group name already exists")
+
+    group = HostGroup(
+        name=request.name.strip(),
+        description=request.description,
+        country_filter=request.country_filter,
+        system_filter=request.system_filter,
+    )
+    session.add(group)
+    session.commit()
+    session.refresh(group)
+
+    for host_id in request.host_ids:
+        session.add(HostGroupMember(group_id=group.id, host_id=host_id))
+    session.commit()
+
+    return HostGroupResponse(
+        id=group.id,
+        name=group.name,
+        description=group.description,
+        country_filter=group.country_filter,
+        system_filter=group.system_filter,
+        host_count=len(request.host_ids),
+        created_at=group.created_at,
+        updated_at=group.updated_at,
+    )
+
+
+@app.patch("/api/admin/groups/{group_id}", response_model=HostGroupResponse)
+async def update_host_group(
+    group_id: int,
+    request: HostGroupUpdateRequest,
+    _: None = Depends(require_admin_api_key),
+    session: Session = Depends(get_session),
+):
+    group = session.get(HostGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    group.description = request.description
+    group.country_filter = request.country_filter
+    group.system_filter = request.system_filter
+    group.updated_at = datetime.utcnow()
+    session.add(group)
+    session.commit()
+
+    if request.host_ids is not None:
+        existing_members = session.exec(
+            select(HostGroupMember).where(HostGroupMember.group_id == group_id)
+        ).all()
+        for member in existing_members:
+            session.delete(member)
+        session.commit()
+        for host_id in request.host_ids:
+            session.add(HostGroupMember(group_id=group_id, host_id=host_id))
+        session.commit()
+
+    host_count = session.exec(
+        select(func.count(HostGroupMember.id)).where(HostGroupMember.group_id == group_id)
+    ).one()
+    session.refresh(group)
+    return HostGroupResponse(
+        id=group.id,
+        name=group.name,
+        description=group.description,
+        country_filter=group.country_filter,
+        system_filter=group.system_filter,
+        host_count=host_count,
+        created_at=group.created_at,
+        updated_at=group.updated_at,
+    )
+
+
+@app.delete("/api/admin/groups/{group_id}")
+async def delete_host_group(
+    group_id: int,
+    _: None = Depends(require_admin_api_key),
+    session: Session = Depends(get_session),
+):
+    group = session.get(HostGroup, group_id)
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+
+    members = session.exec(
+        select(HostGroupMember).where(HostGroupMember.group_id == group_id)
+    ).all()
+    for member in members:
+        session.delete(member)
+    session.delete(group)
+    session.commit()
+    return {"status": "deleted", "group_id": group_id}
+
+
 @app.get("/api/export")
 async def export_data(
     format: str = Query("csv", regex="^(csv|json)$"),
     model: str | None = None,
     family: str | None = None,
     gpu: bool | None = None,
+    country: str | None = None,
+    system: str | None = None,
+    group_id: int | None = None,
     session: Session = Depends(get_session),
 ):
-    # Build query
-    query = select(Host)
-    if model:
-        query = query.join(HostModel).join(Model).where(Model.name.contains(model))
-    if family:
-        query = query.join(HostModel).join(Model).where(Model.family == family)
-    if gpu is not None:
-        if gpu:
-            query = query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
-        else:
-            query = query.where(
-                (Host.gpu.is_(None)) & ((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb.is_(None)))
-            )
+    query = _apply_host_filters(
+        select(Host),
+        model=model,
+        family=family,
+        gpu=gpu,
+        country=country,
+        system=system,
+        group_id=group_id,
+    )
 
     hosts = session.exec(query).all()
 
@@ -898,6 +1333,9 @@ class ClearFilteredHostsRequest(BaseModel):
     family: str | None = None
     gpu: bool | None = None
     status: str | None = None
+    country: str | None = None
+    system: str | None = None
+    group_id: int | None = None
 
 
 @app.post("/api/hosts/clear-filtered")
@@ -907,27 +1345,16 @@ async def clear_filtered_hosts(
     _: None = Depends(require_admin_api_key),
 ):
     """Clear hosts that match the specified filters"""
-    # Build query to find hosts to delete
-    query = select(Host)
-
-    # Apply the same filters as the list_hosts endpoint
-    needs_model_join = bool(request.model or request.family)
-    if needs_model_join:
-        query = query.join(HostModel).join(Model)
-
-    if request.model:
-        query = query.where(Model.name.contains(request.model))
-    if request.family:
-        query = query.where(Model.family == request.family)
-    if request.gpu is not None:
-        if request.gpu:
-            query = query.where((Host.gpu == "available") | (Host.gpu_vram_mb > 0))
-        else:
-            query = query.where(
-                (Host.gpu.is_(None)) & ((Host.gpu_vram_mb == 0) | (Host.gpu_vram_mb.is_(None)))
-            )
-    if request.status:
-        query = query.where(Host.status == request.status)
+    query = _apply_host_filters(
+        select(Host),
+        model=request.model,
+        family=request.family,
+        gpu=request.gpu,
+        status=request.status,
+        country=request.country,
+        system=request.system,
+        group_id=request.group_id,
+    )
 
     # Get hosts to delete
     hosts_to_delete = session.exec(query).all()
@@ -949,6 +1376,12 @@ async def clear_filtered_hosts(
         probes = session.exec(select(Probe).where(Probe.host_id.in_(host_ids_to_delete))).all()
         for probe in probes:
             session.delete(probe)
+
+        memberships = session.exec(
+            select(HostGroupMember).where(HostGroupMember.host_id.in_(host_ids_to_delete))
+        ).all()
+        for membership in memberships:
+            session.delete(membership)
 
     # Delete the hosts
     deleted_count = 0
@@ -1037,46 +1470,37 @@ async def metrics():
     return Response(content=generate_latest(), media_type="text/plain")
 
 
-class MasscanRequest(BaseModel):
-    target: str = "0.0.0.0/0"
-    port: str = "11434"
-    rate: int = 100000
-    router_mac: str = "00:21:59:a0:cf:c1"
-
-
-class MasscanResponse(BaseModel):
-    scan_id: int
-    status: str
-    message: str
-
-
 @app.post("/api/masscan", response_model=MasscanResponse)
 async def run_masscan(
     request: MasscanRequest,
     session: Session = Depends(get_session),
 ):
 
-    service = MasscanService(session)
+    service = ScanService(session)
 
-    def run_in_background():
-        service.run_scan(
+    try:
+        result = service.run_scan(
             target=request.target,
             port=request.port,
             rate=request.rate,
             router_mac=request.router_mac,
+            strategy=request.strategy,
+            tor_max_hosts=request.tor_max_hosts,
+            tor_concurrency=request.tor_concurrency,
+            shodan_query=request.shodan_query,
+            shodan_page_limit=request.shodan_page_limit,
+            shodan_max_matches=request.shodan_max_matches,
+            shodan_max_queries=request.shodan_max_queries,
+            shodan_query_max_length=request.shodan_query_max_length,
         )
-
-    result = service.run_scan(
-        target=request.target,
-        port=request.port,
-        rate=request.rate,
-        router_mac=request.router_mac,
-    )
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
     return MasscanResponse(
         scan_id=result["scan_id"],
         status="started",
-        message=f"Masscan started. Output: {result['output_file']}",
+        message=f"{result['strategy']} scan started. Output: {result['output_file']}",
+        strategy=result["strategy"],
     )
 
 
@@ -1085,7 +1509,7 @@ async def get_masscan_status(
     scan_id: int,
     session: Session = Depends(get_session),
 ):
-    service = MasscanService(session)
+    service = ScanService(session)
     return service.get_progress(scan_id)
 
 
@@ -1094,30 +1518,22 @@ async def ingest_masscan_results(
     scan_id: int,
     session: Session = Depends(get_session),
 ):
-    service = MasscanService(session)
+    service = ScanService(session)
     results_file = service.get_results_file(scan_id)
 
     if not results_file:
         raise HTTPException(status_code=404, detail="Scan results not found")
 
-    with open(results_file) as f:
-        content = f.read()
-
-    output_file = f"/workspace/imports/masscan-{scan_id}.txt"
-    with open(output_file, "w") as f:
-        for line in content.split("\n"):
-            if '"ip":' in line:
-                import re
-
-                ip_match = re.search(r'"ip":\s*"([^"]+)"', line)
-                if ip_match:
-                    f.write(f"{ip_match.group(1)}:11434\n")
+    try:
+        output_file = service.prepare_ingest_file(scan_id)
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
     scan = session.get(Scan, scan_id)
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
 
-    scan.source_file = f"masscan-ingest:{scan_id}"
+    scan.source_file = f"scan-ingest:{scan_id}"
     session.commit()
 
     from app.ingest import IngestService
@@ -1154,41 +1570,134 @@ _aco_scheduler: ACOMasscanScheduler | None = None
 
 
 def _on_aco_block_result(result: BlockScanResult) -> None:
-    """Ingest ACO block scan results automatically."""
-    if not result.success or result.hosts_found == 0:
-        return
+    from app.masscan import (
+        DEFAULT_POLICY_SNAPSHOT_HASH,
+        create_stage_receipt_for_workflow,
+        create_workflow_for_aco_block,
+    )
+    from app.masscan_aco import SchedulerConfig
+
+    config = SchedulerConfig()
+    exclude_snapshot_hash = hashlib.sha256(
+        "\n".join(load_exclude_list(config.exclude_file)).encode("utf-8")
+    ).hexdigest()
+
     try:
         from app.db import get_session as _get_session
 
         with next(_get_session()) as session:
+            scan = Scan(
+                source_file=f"aco-block:{result.cidr}",
+                mapping_json=json.dumps(
+                    {
+                        "scan_uuid": result.scan_uuid,
+                        "cidr": result.cidr,
+                        "strategy": config.strategy,
+                        "port": config.port,
+                    }
+                ),
+                status="running",
+                started_at=result.started_at,
+            )
+            session.add(scan)
+            session.commit()
+            session.refresh(scan)
+
+            workflow = create_workflow_for_aco_block(
+                session,
+                scan,
+                cidr=result.cidr,
+                port=config.port,
+                exclude_snapshot_hash=exclude_snapshot_hash,
+            )
+
+            create_stage_receipt_for_workflow(
+                session,
+                workflow.workflow_id,
+                stage_name="discover",
+                status="started",
+                input_refs=[result.cidr, config.port],
+                output_refs=[result.output_file],
+                evidence_refs=[result.log_file, result.output_file],
+            )
+
             ingest = _IngestService(session)
-            with open(result.output_file, "rb") as f:
-                records = list(ingest.parse_stream(f.read(), {}))
-                if records:
-                    scan = Scan(
-                        source_file=f"aco-block:{result.cidr}",
-                        mapping_json="{}",
-                        status="processing",
-                    )
-                    session.add(scan)
-                    session.commit()
-                    session.refresh(scan)
-                    success, failed = ingest.process_batch(
-                        records,
-                        scan.id or 0,
-                        auto_probe_new_hosts=True,
-                    )
-                    scan.status = "completed"
-                    scan.completed_at = datetime.utcnow()
-                    scan.total_rows = len(records)
-                    scan.processed_rows = success
-                    scan.stats_json = json.dumps(
-                        {"success": success, "failed": failed, "cidr": result.cidr}
-                    )
-                    session.commit()
-                    _aco_logger.info("ACO block %s ingested: %d hosts", result.cidr, success)
+            hosts_found = 0
+            try:
+                with open(result.output_file, "rb") as f:
+                    records = list(ingest.parse_stream(f.read(), {}))
+                    if records:
+                        success, failed = ingest.process_batch(
+                            records,
+                            scan.id or 0,
+                            auto_probe_new_hosts=True,
+                        )
+                        hosts_found = success
+                        scan.total_rows = len(records)
+                        scan.processed_rows = success
+            except Exception as ingest_error:
+                _aco_logger.exception("ACO block ingest failed for %s", result.cidr)
+                scan.status = "failed"
+                scan.error_message = str(ingest_error)
+                workflow.status = "failed"
+                workflow.last_error = str(ingest_error)
+                workflow.completed_at = datetime.utcnow()
+                create_stage_receipt_for_workflow(
+                    session,
+                    workflow.workflow_id,
+                    stage_name="discover",
+                    status="failed",
+                    input_refs=[result.cidr, config.port],
+                    output_refs=[result.output_file],
+                    metrics={"attempted_hosts": 0, "discovered_hosts": 0},
+                    evidence_refs=[result.log_file, result.output_file],
+                    error=str(ingest_error),
+                )
+                session.commit()
+                return
+
+            scan.status = "completed"
+            scan.completed_at = result.completed_at or datetime.utcnow()
+            scan.stats_json = json.dumps(
+                {
+                    "success": hosts_found,
+                    "failed": 0,
+                    "cidr": result.cidr,
+                    "duration_ms": result.duration_ms,
+                }
+            )
+
+            workflow.status = "completed"
+            workflow.completed_at = result.completed_at or datetime.utcnow()
+            workflow.summary_json = json.dumps(
+                {
+                    "attempted_hosts": 0,
+                    "discovered_hosts": hosts_found,
+                    "verified_hosts": 0,
+                    "geocoded_hosts": 0,
+                    "emitted_nodes": 0,
+                    "emitted_edges": 0,
+                    "classified_hosts": 0,
+                    "alerts_created": 0,
+                }
+            )
+
+            create_stage_receipt_for_workflow(
+                session,
+                workflow.workflow_id,
+                stage_name="discover",
+                status="completed",
+                input_refs=[result.cidr, config.port],
+                output_refs=[result.output_file],
+                metrics={"attempted_hosts": 0, "discovered_hosts": hosts_found},
+                evidence_refs=[result.log_file, result.output_file],
+            )
+
+            session.commit()
+            _aco_logger.info("ACO block %s ingested: %d hosts", result.cidr, hosts_found)
+
     except Exception as e:
-        _aco_logger.error("ACO block ingest failed for %s: %s", result.cidr, e)
+        _aco_logger.exception("ACO block workflow failed for %s", result.cidr)
 
 
 def _aco_not_running_snapshot() -> dict:
@@ -1216,6 +1725,15 @@ def _aco_not_running_snapshot() -> dict:
                     "rate": config.rate,
                     "max_block_duration_s": config.max_block_duration_s,
                     "min_scan_interval_s": config.min_scan_interval_s,
+                    "breathing_room_s": config.breathing_room_s,
+                    "router_mac": config.router_mac,
+                    "interface": config.interface,
+                    "exclude_file": config.exclude_file,
+                    "aco_alpha": config.aco_alpha,
+                    "aco_beta": config.aco_beta,
+                    "aco_decay": config.aco_decay,
+                    "aco_reinforcement": config.aco_reinforcement,
+                    "aco_penalty": config.aco_penalty,
                 },
                 "stats": stats,
                 "current_job": None,
@@ -1224,6 +1742,9 @@ def _aco_not_running_snapshot() -> dict:
                     {
                         "cidr": cidr,
                         "pheromone": round(pheromone, 4),
+                        "scan_count": 0,
+                        "cumulative_yield": 0,
+                        "last_scan": None,
                     }
                     for cidr, pheromone in top
                 ],
@@ -1305,16 +1826,19 @@ def _get_host_geography(session: Session, limit: int = 20) -> dict:
         .where(or_(Host.geo_country.is_(None), Host.geo_country == ""))
     ).one()
 
-    host_rows = session.exec(
-        select(
-            Host.ip,
-            Host.geo_country,
-            Host.geo_city,
-            Host.geo_lat,
-            Host.geo_lon,
-            Host.status,
-        ).where(Host.geo_lat.is_not(None), Host.geo_lon.is_not(None))
-    ).all()
+    try:
+        host_rows = session.exec(
+            select(
+                Host.ip,
+                Host.geo_country,
+                Host.geo_city,
+                Host.geo_lat,
+                Host.geo_lon,
+                Host.status,
+            ).where(Host.geo_lat.is_not(None), Host.geo_lon.is_not(None))
+        ).all()
+    except OperationalError:
+        host_rows = []
 
     return {
         "known_hosts": known_hosts,
@@ -1451,16 +1975,51 @@ async def get_aco_scan_logs(
 
 
 @app.post("/api/aco/scan/start")
-async def start_aco_scan(_: None = Depends(require_admin_api_key)):
+async def start_aco_scan(
+    request: ACOStartRequest | None = None,
+    _: None = Depends(require_admin_api_key),
+):
     """Start the ACO-guided masscan block scanner."""
     global _aco_scheduler
+    from app.masscan_aco import SchedulerConfig
+
     if _aco_scheduler:
         snapshot = _aco_scheduler.dashboard_snapshot(result_limit=10, block_limit=10)
         if snapshot["status"] != "stopped":
             return {"status": "already_running", "scheduler": snapshot}
         _aco_scheduler = None
 
+    payload = request or ACOStartRequest()
+    config = SchedulerConfig(
+        port=payload.port if payload.port is not None else "11434",
+        rate=payload.rate if payload.rate is not None else 100_000,
+        max_block_duration_s=(
+            payload.max_block_duration_s if payload.max_block_duration_s is not None else 120.0
+        ),
+        min_scan_interval_s=(
+            payload.min_scan_interval_s if payload.min_scan_interval_s is not None else 3600.0
+        ),
+        breathing_room_s=(
+            payload.breathing_room_s if payload.breathing_room_s is not None else 2.0
+        ),
+        router_mac=payload.router_mac if payload.router_mac is not None else "00:21:59:a0:cf:c1",
+        interface=(
+            payload.interface
+            if payload.interface is not None
+            else os.environ.get("MASSCAN_INTERFACE", "eth0")
+        ),
+        exclude_file=settings.our_gpus_exclude_files,
+        aco_alpha=payload.aco_alpha if payload.aco_alpha is not None else 0.6,
+        aco_beta=payload.aco_beta if payload.aco_beta is not None else 0.4,
+        aco_decay=payload.aco_decay if payload.aco_decay is not None else 0.05,
+        aco_reinforcement=(
+            payload.aco_reinforcement if payload.aco_reinforcement is not None else 0.3
+        ),
+        aco_penalty=payload.aco_penalty if payload.aco_penalty is not None else 0.2,
+    )
+
     _aco_scheduler = ACOMasscanScheduler(
+        config=config,
         on_result=_on_aco_block_result,
     )
     _aco_scheduler.start()

@@ -18,6 +18,7 @@ class IngestResponse(BaseModel):
 
 class ScanResponse(BaseModel):
     id: int
+    workflow_id: str | None = None
     source_file: str
     status: str
     started_at: datetime
@@ -51,8 +52,35 @@ class HostResponse(BaseModel):
     gpu_vram_mb: int | None
     geo_country: str | None = None
     geo_city: str | None = None
+    groups: list[str] | None = None
     models: list[Any]
     last_probe: dict[str, Any] | None = None
+
+
+class HostGroupCreateRequest(BaseModel):
+    name: str
+    description: str | None = None
+    country_filter: str | None = None
+    system_filter: str | None = None
+    host_ids: list[int] = Field(default_factory=list)
+
+
+class HostGroupUpdateRequest(BaseModel):
+    description: str | None = None
+    country_filter: str | None = None
+    system_filter: str | None = None
+    host_ids: list[int] | None = None
+
+
+class HostGroupResponse(BaseModel):
+    id: int
+    name: str
+    description: str | None
+    country_filter: str | None
+    system_filter: str | None
+    host_count: int
+    created_at: datetime
+    updated_at: datetime
 
 
 class ModelResponse(BaseModel):
@@ -98,3 +126,44 @@ class PromptResponse(BaseModel):
     prompt_eval_duration: int | None = None
     eval_duration: int | None = None
     eval_count: int | None = None
+
+
+class WorkflowReceiptResponse(BaseModel):
+    receipt_id: str
+    workflow_id: str
+    stage_name: str
+    status: str
+    operator_id: str | None = None
+    input_refs: list[str]
+    output_refs: list[str]
+    metrics: dict[str, Any]
+    evidence_refs: list[str]
+    policy_decisions: list[str]
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
+class WorkflowResponse(BaseModel):
+    workflow_id: str
+    scan_id: int | None = None
+    workflow_kind: str
+    target: str
+    port: str
+    strategy: str
+    status: str
+    current_stage: str | None = None
+    operator_id: str | None = None
+    exclude_snapshot_hash: str
+    policy_snapshot_hash: str
+    parent_workflow_id: str | None = None
+    requested_config: dict[str, Any]
+    summary: dict[str, Any]
+    last_error: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class WorkflowDetailResponse(WorkflowResponse):
+    receipts: list[WorkflowReceiptResponse]

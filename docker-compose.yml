@@ -43,14 +43,23 @@ services:
       - ./.env:/app/.env
     environment:
       - DATABASE_URL=${WORKER_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-our_gpus}:${POSTGRES_PASSWORD:-our_gpus_dev_password}@postgres:5432/${POSTGRES_DB:-our_gpus}}
+      - PROBE_SIDECAR_URL=http://probe-sidecar:4002
       - REDIS_URL=redis://redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
+      probe-sidecar:
+        condition: service_started
       redis:
         condition: service_healthy
       api:
         condition: service_healthy
+    restart: unless-stopped
+
+  probe-sidecar:
+    build:
+      context: ./services/probe-sidecar
+      dockerfile: Dockerfile
     restart: unless-stopped
 
   postgres:

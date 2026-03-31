@@ -4,9 +4,10 @@
 
 ### Backend (Python)
 - Build: `make build` or `docker compose build`
-- Lint: `make lint` or `ruff check app/ worker/ cli/ tests/`
-- Format: `make fmt` or `ruff format app/ worker/ cli/ tests/`
-- Test: `make test` or `pytest tests/ -v`
+- Install deps: `uv sync --dev`
+- Lint: `make lint` or `uv run ruff check app/ worker/ cli/ tests/`
+- Format: `make fmt` or `uv run ruff format app/ worker/ cli/ tests/`
+- Test: `make test` or `uv run pytest tests/ -v`
 
 ### Frontend (React)
 - Lint: `cd web && bun run lint`

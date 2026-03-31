@@ -16,14 +16,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff
-      
+        run: uv sync --dev
+
       - name: Run Ruff
-        run: ruff check app/ worker/ cli/ tests/
+        run: uv run ruff check app/ worker/ cli/ tests/
 
   test-backend:
     runs-on: ubuntu-latest
@@ -34,16 +35,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio pytest-cov
-      
+        run: uv sync --dev
+
       - name: Run tests
         run: |
-          pytest tests/ -v --cov=app --cov=worker --cov-report=xml
+          uv run pytest tests/ -v --cov=app --cov=worker --cov-report=xml
           
       - name: Clean up test database
         if: always()

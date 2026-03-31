@@ -28,7 +28,9 @@ class ProbeService:
         for attempt in range(self.retries):
             try:
                 async with httpx.AsyncClient(
-                    verify=False, timeout=httpx.Timeout(self.timeout, connect=self.timeout)
+                    verify=False,
+                    trust_env=True,
+                    timeout=httpx.Timeout(self.timeout, connect=self.timeout),
                 ) as client:
                     # Collect all API data
                     tags_resp = await client.get(f"{base_url}/api/tags")
@@ -228,7 +230,9 @@ class ProbeService:
 
         try:
             async with httpx.AsyncClient(
-                verify=False, timeout=httpx.Timeout(30.0, connect=10.0)
+                verify=False,
+                trust_env=True,
+                timeout=httpx.Timeout(30.0, connect=10.0),
             ) as client:
                 # Prepare the request payload
                 payload = {"model": model, "prompt": prompt, "stream": stream}
@@ -282,7 +286,9 @@ class ProbeService:
 
         try:
             async with httpx.AsyncClient(
-                verify=False, timeout=httpx.Timeout(30.0, connect=10.0)
+                verify=False,
+                trust_env=True,
+                timeout=httpx.Timeout(30.0, connect=10.0),
             ) as client:
                 payload = {"model": model, "prompt": prompt, "stream": True}
 

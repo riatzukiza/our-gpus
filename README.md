@@ -60,13 +60,13 @@ docker compose up -d --build
 
 ```bash
 # Ingest JSON file
-python cli/ingest_json.py data/sample.json --auto-detect
+uv run python cli/ingest_json.py data/sample.json --auto-detect
 
 # Re-probe hosts
-python cli/rescan_hosts.py --status offline --limit 100
+uv run python cli/rescan_hosts.py --status offline --limit 100
 
 # Probe GPU-enabled hosts
-python cli/rescan_hosts.py --gpu --concurrency 50
+uv run python cli/rescan_hosts.py --gpu --concurrency 50
 ```
 
 ## Architecture
@@ -80,15 +80,18 @@ python cli/rescan_hosts.py --gpu --concurrency 50
 ## Development
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install Python dependencies
+uv sync --dev
 cd web && bun install  # Requires Bun to be installed (https://bun.sh/)
 
 # Run tests
-pytest tests/
+uv run pytest tests/
 
 # Start development servers
 make dev
+
+# Refresh generated dynamic excludes
+make refresh-excludes
 ```
 
 ## Configuration
@@ -108,6 +111,7 @@ Key environment variables in `.env`:
 - `OUR_GPUS_API_KEY`, `PROXX_API_KEY`: Optional shared federation/admin keys. Reusing the proxx key is supported.
 - `UPLOAD_MAX_MB`: Max upload size (default: 4096)
 - `BATCH_SIZE`: Processing batch size (default: 1000)
+- `OUR_GPUS_EXCLUDE_FILES`: comma-separated layered exclude files (default: `/app/excludes.conf,/app/excludes.generated.conf`)
 
 ### Migrating from SQLite to Postgres
 

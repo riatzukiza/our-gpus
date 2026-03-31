@@ -8,8 +8,14 @@ Default: /16 blocks (65,536 blocks × 65,536 IPs each).
 from __future__ import annotations
 
 import ipaddress
-import math
+import os
+from collections.abc import Sequence
 from pathlib import Path
+
+DEFAULT_EXCLUDE_FILES = (
+    "/app/excludes.conf",
+    "/app/excludes.generated.conf",
+)
 
 
 def split_ipv4(prefix_len: int = 16) -> list[str]:
@@ -65,7 +71,25 @@ def optimal_prefix_for_target_duration(
         block_size = 1 << (32 - prefix)
         if block_size <= ips_per_block:
             return prefix
-    return 32  # fallback: single IP blocks (will never hit this)</think>
+    return 32  # fallback: single IP blocks (will never hit this)
+
+
+def resolve_exclude_paths(paths: str | Sequence[str] | None = None) -> list[str]:
+    if paths is None:
+        paths = os.environ.get("OUR_GPUS_EXCLUDE_FILES", ",".join(DEFAULT_EXCLUDE_FILES))
+
+    if isinstance(paths, str):
+        raw_entries = [entry.strip() for entry in paths.split(",")]
+    else:
+        raw_entries = [str(entry).strip() for entry in paths]
+
+    resolved: list[str] = []
+    for entry in raw_entries:
+        if not entry:
+            continue
+        if entry not in resolved:
+            resolved.append(entry)
+    return resolved
 
 
 def _range_to_start_end(start_ip: str, end_ip: str) -> tuple[int, int]:
@@ -113,21 +137,38 @@ def _normalize_exclude_entry(entry: str) -> list[str]:
         return []
 
 
-def load_exclude_list(path: str = "/app/excludes.conf") -> list[str]:
-    """Load and normalize exclude entries from file into CIDR strings."""
-    try:
-        content = Path(path).read_text()
-    except FileNotFoundError:
-        return []
-
+def load_exclude_list(paths: str | Sequence[str] | None = None) -> list[str]:
+    """Load and normalize exclude entries from one or more files into CIDR strings."""
     normalized: list[str] = []
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    seen = set()
+
+    for path in resolve_exclude_paths(paths):
+        try:
+            content = Path(path).read_text()
+        except FileNotFoundError:
             continue
-        normalized.extend(_normalize_exclude_entry(line))
+
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            for entry in _normalize_exclude_entry(line):
+                if entry not in seen:
+                    seen.add(entry)
+                    normalized.append(entry)
 
     return normalized
+
+
+def write_combined_exclude_file(
+    output_path: str,
+    paths: str | Sequence[str] | None = None,
+) -> str:
+    excludes = load_exclude_list(paths)
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(excludes) + ("\n" if excludes else ""))
+    return str(path)
 
 
 def filter_blocks(
@@ -168,12 +209,22 @@ _DEFAULT_BLOCKS: dict[tuple[int, str], list[str]] = {}
 
 def get_default_blocks(
     prefix_len: int = 16,
-    exclude_file: str = "/app/excludes.conf",
+    exclude_file: str | Sequence[str] | None = None,
 ) -> list[str]:
     """Get filtered default blocks, cached."""
-    cache_key = (prefix_len, exclude_file)
+    resolved_paths = tuple(resolve_exclude_paths(exclude_file))
+    cache_key = (
+        prefix_len,
+        tuple(
+            (
+                path,
+                Path(path).stat().st_mtime_ns if Path(path).exists() else None,
+            )
+            for path in resolved_paths
+        ),
+    )
     if cache_key not in _DEFAULT_BLOCKS:
         blocks = split_ipv4(prefix_len)
-        excludes = load_exclude_list(exclude_file)
+        excludes = load_exclude_list(resolved_paths)
         _DEFAULT_BLOCKS[cache_key] = filter_blocks(blocks, excludes)
     return _DEFAULT_BLOCKS[cache_key]

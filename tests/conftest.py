@@ -1,9 +1,16 @@
 import os
-from unittest.mock import patch
+import sys
+from unittest.mock import patch, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
+
+# Mock celery before importing anything from worker
+mock_celery = MagicMock()
+sys.modules["worker.celery_app"] = MagicMock()
+sys.modules["worker.celery_app"].celery_app = mock_celery
+sys.modules["worker.tasks"] = MagicMock()
 
 from app.config import settings
 from app.db import get_session
@@ -21,7 +28,7 @@ def test_engine():
         os.unlink("./test_ci.db")
 
     # Import all models to ensure they're registered
-    from app.db import Host, HostModel, Model, Probe, Scan, TaskJob  # noqa: F401
+    from app.db import Host, HostModel, Model, Probe, Scan, TaskJob, Workflow, WorkflowStageReceipt  # noqa: F401
 
     engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False}, echo=False)
 
@@ -40,11 +47,22 @@ def session(test_engine):
     """Create a test database session"""
     with Session(test_engine) as session:
         # Clean up all data before each test
-        from app.db import Host, HostModel, Model, Probe, Scan, TaskJob  # noqa: F401
+        from app.db import (
+            Host,
+            HostModel,
+            Model,
+            Probe,
+            Scan,
+            TaskJob,
+            Workflow,
+            WorkflowStageReceipt,
+        )  # noqa: F401
 
         # Delete all data in correct order to respect foreign keys
         session.exec(Probe.__table__.delete())
         session.exec(TaskJob.__table__.delete())
+        session.exec(WorkflowStageReceipt.__table__.delete())
+        session.exec(Workflow.__table__.delete())
         session.exec(HostModel.__table__.delete())
         session.exec(Scan.__table__.delete())
         session.exec(Host.__table__.delete())

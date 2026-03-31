@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     probe_concurrency: int = 200
     probe_retries: int = 2
     probe_batch_size: int = 100
+    probe_sidecar_url: str = ""
     geocode_timeout_secs: int = 5
     geocode_retries: int = 2
     geocode_data_path: str = "/app/data/geoip2fast-city.dat.gz"
@@ -26,6 +27,15 @@ class Settings(BaseSettings):
     cloudflare_access_audience: str = ""
     batch_size: int = 1000
     workers: int = 4
+    our_gpus_exclude_files: str = "/app/excludes.conf,/app/excludes.generated.conf"
+    tor_scan_max_hosts: int = 4096
+    tor_scan_concurrency: int = 32
+    shodan_api_key: str = ""
+    shodan_base_query: str = ""
+    shodan_page_limit: int = 3
+    shodan_max_matches: int = 1000
+    shodan_max_queries: int = 24
+    shodan_query_max_length: int = 900
 
     class Config:
         env_file = ".env"

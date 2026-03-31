@@ -4,11 +4,12 @@ import logging
 from datetime import datetime
 
 from celery import current_task
+import httpx
 from sqlalchemy import or_
 from sqlmodel import Session, create_engine, select
 
 from app.config import settings
-from app.db import Host, HostModel, Model, Scan, TaskJob
+from app.db import Host, HostModel, Model, Probe, Scan, TaskJob
 from app.geocode import GeoService
 from app.ingest import IngestService
 from app.probe import ProbeService
@@ -191,6 +192,128 @@ def queue_host_probes(host_ids: list[int], batch_size: int | None = None) -> lis
         )
         task_ids.append(task.id)
     return task_ids
+
+
+def _persist_sidecar_probe_result(
+    host_id: int,
+    result: dict,
+    service: ProbeService,
+    geo_service: GeoService,
+    loop: asyncio.AbstractEventLoop,
+) -> dict:
+    with Session(engine) as session:
+        host = session.get(Host, host_id)
+        if not host:
+            return {"error": "Host not found", "host_id": host_id}
+
+        host_update = result.get("hostUpdate", {})
+        host.status = host_update.get("status", host.status)
+        host.last_seen = datetime.utcnow()
+        host.latency_ms = host_update.get("latencyMs")
+        host.api_version = host_update.get("apiVersion")
+        host.gpu = host_update.get("gpu")
+        host.gpu_vram_mb = host_update.get("gpuVramMb")
+        host.last_error = host_update.get("lastError")
+
+        geocode_result = loop.run_until_complete(geo_service.geocode_host(host))
+
+        probe = Probe(
+            host_id=host.id,
+            status=result.get("status", "error"),
+            duration_ms=result.get("durationMs", 0),
+            raw_payload=json.dumps(
+                {
+                    "tags": result.get("tagsData", {}),
+                    "ps": result.get("psData", {}),
+                    "version": result.get("versionData", {}),
+                }
+            )
+            if result.get("status") == "success"
+            else "",
+            error=result.get("error"),
+        )
+        session.add(probe)
+        session.add(host)
+
+        if result.get("status") == "success":
+            try:
+                tags_data = result.get("tagsData", {})
+                ps_data = result.get("psData", {})
+
+                existing_host_models = session.exec(
+                    select(HostModel).where(HostModel.host_id == host.id)
+                ).all()
+                for host_model in existing_host_models:
+                    session.delete(host_model)
+
+                models = service.extract_models(tags_data)
+                for model_data in models:
+                    model = session.exec(
+                        select(Model).where(Model.name == model_data["name"])
+                    ).first()
+
+                    if not model:
+                        model = Model(
+                            name=model_data["name"],
+                            family=model_data["family"],
+                            parameters=model_data["parameters"],
+                        )
+                        session.add(model)
+                        session.flush()
+
+                    host_model = HostModel(host_id=host.id, model_id=model.id, loaded=False)
+
+                    for loaded_model in ps_data.get("models", []):
+                        if loaded_model.get("name") == model_data["name"]:
+                            host_model.loaded = True
+                            host_model.vram_usage_mb = loaded_model.get("size_vram", 0) // (
+                                1024 * 1024
+                            )
+                            break
+
+                    session.add(host_model)
+            except Exception as exc:
+                logger.error(f"Error processing sidecar models for host {host_id}: {str(exc)}")
+
+        session.commit()
+
+        return {
+            "status": probe.status,
+            "duration_ms": probe.duration_ms,
+            "host": f"{host.ip}:{host.port}",
+            "host_id": host_id,
+            "geocode_status": geocode_result["status"],
+        }
+
+
+def _probe_batch_via_sidecar(host_ids: list[int]) -> list[dict] | None:
+    if not settings.probe_sidecar_url:
+        return None
+
+    with Session(engine) as session:
+        hosts = [session.get(Host, host_id) for host_id in host_ids]
+        payload = {
+            "hosts": [
+                {"hostId": host.id, "ip": host.ip, "port": host.port}
+                for host in hosts
+                if host is not None and host.id is not None
+            ],
+            "timeoutSeconds": settings.probe_timeout_secs,
+            "retries": settings.probe_retries,
+            "concurrency": settings.probe_concurrency,
+        }
+
+    if not payload["hosts"]:
+        return []
+
+    response = httpx.post(
+        f"{settings.probe_sidecar_url.rstrip('/')}/probe-batch",
+        json=payload,
+        timeout=httpx.Timeout(max(60.0, settings.probe_timeout_secs * len(payload["hosts"]))),
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data.get("results", [])
 
 
 def _probe_single_host(
@@ -471,8 +594,28 @@ def batch_probe(self, host_ids: list):  # noqa: ARG001
         status_counts: dict[str, int] = {}
         geocode_counts: dict[str, int] = {}
 
-        for index, host_id in enumerate(host_ids, start=1):
-            result = _probe_single_host(host_id, service, loop, geo_service=geo_service)
+        sidecar_results = _probe_batch_via_sidecar(host_ids)
+        if sidecar_results is not None:
+            sidecar_by_host_id = {result.get("hostId"): result for result in sidecar_results}
+            iterable = [
+                _persist_sidecar_probe_result(
+                    host_id,
+                    sidecar_by_host_id.get(
+                        host_id, {"status": "error", "error": "Missing sidecar result"}
+                    ),
+                    service,
+                    geo_service,
+                    loop,
+                )
+                for host_id in host_ids
+            ]
+        else:
+            iterable = [
+                _probe_single_host(host_id, service, loop, geo_service=geo_service)
+                for host_id in host_ids
+            ]
+
+        for index, result in enumerate(iterable, start=1):
             results.append(result)
             status = result.get("status", "error")
             status_counts[status] = status_counts.get(status, 0) + 1
