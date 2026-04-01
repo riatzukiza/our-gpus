@@ -1,8 +1,14 @@
 import json
 from datetime import datetime
+from typing import Any
+from uuid import uuid4
 
-from sqlalchemy import Column, Index, Text, inspect, text
+from sqlalchemy import JSON, CheckConstraint, Column, Index, Text, UniqueConstraint, inspect, text
 from sqlmodel import Field, Session, SQLModel, create_engine
+
+
+def _uuid_str() -> str:
+    return str(uuid4())
 
 
 class Host(SQLModel, table=True):
@@ -240,6 +246,306 @@ class WorkflowStageReceipt(SQLModel, table=True):
     @policy_decisions.setter
     def policy_decisions(self, value: list):
         self.policy_decisions_json = json.dumps(value)
+
+
+class Organization(SQLModel, table=True):
+    __tablename__ = "organizations"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    name: str
+    normalized_name: str = Field(index=True)
+    country_code: str | None = Field(default=None, max_length=2)
+    confidence_baseline: float = 0.0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("normalized_name", "country_code", name="uq_organizations_name_country"),
+    )
+
+
+class AutonomousSystem(SQLModel, table=True):
+    __tablename__ = "asns"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    asn: int = Field(index=True)
+    org_name: str | None = None
+    organization_id: str | None = Field(default=None, foreign_key="organizations.id", index=True)
+    rir: str | None = None
+    country_code: str | None = Field(default=None, max_length=2)
+    rdap_handle: str | None = None
+    rdap_url: str | None = None
+    raw_last_verified_at: datetime | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class DomainRecord(SQLModel, table=True):
+    __tablename__ = "domains"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    fqdn: str = Field(index=True)
+    root_domain: str | None = Field(default=None, index=True)
+    organization_id: str | None = Field(default=None, foreign_key="organizations.id", index=True)
+    source_type: str
+    first_seen: datetime = Field(default_factory=datetime.utcnow)
+    last_seen: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("fqdn", name="uq_domains_fqdn"),)
+
+
+class Asset(SQLModel, table=True):
+    __tablename__ = "assets"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    ip: str | None = Field(default=None, index=True)
+    hostname: str | None = Field(default=None, index=True)
+    domain: str | None = Field(default=None, index=True)
+    port: int | None = None
+    protocol: str | None = None
+    service: str | None = None
+    asn_id: str | None = Field(default=None, foreign_key="asns.id", index=True)
+    country_code: str | None = Field(default=None, max_length=2)
+    region: str | None = None
+    city: str | None = None
+    observed_banner_hash: str | None = None
+    first_seen: datetime = Field(default_factory=datetime.utcnow)
+    last_seen: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("ip", "port", "protocol", name="uq_assets_ip_port_protocol"),
+        UniqueConstraint("hostname", "port", "protocol", name="uq_assets_hostname_port_protocol"),
+        CheckConstraint(
+            "ip IS NOT NULL OR hostname IS NOT NULL OR domain IS NOT NULL",
+            name="ck_assets_identity_present",
+        ),
+    )
+
+
+class AssetDomain(SQLModel, table=True):
+    __tablename__ = "asset_domains"
+
+    asset_id: str = Field(foreign_key="assets.id", primary_key=True)
+    domain_id: str = Field(foreign_key="domains.id", primary_key=True)
+    relationship: str = Field(primary_key=True)
+    confidence: float = 0.0
+    first_seen: datetime = Field(default_factory=datetime.utcnow)
+    last_seen: datetime = Field(default_factory=datetime.utcnow)
+
+
+class RawFetch(SQLModel, table=True):
+    __tablename__ = "raw_fetches"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    source_type: str = Field(index=True)
+    fetch_kind: str
+    asset_id: str | None = Field(default=None, foreign_key="assets.id", index=True)
+    domain_id: str | None = Field(default=None, foreign_key="domains.id", index=True)
+    asn_id: str | None = Field(default=None, foreign_key="asns.id")
+    organization_id: str | None = Field(default=None, foreign_key="organizations.id")
+    request_url: str
+    canonical_url: str | None = None
+    request_key: str
+    http_status: int | None = None
+    fetch_status: str = Field(default="pending", index=True)
+    transport_ok: bool = False
+    parse_ok: bool = False
+    extraction_ok: bool = False
+    content_type: str | None = None
+    content_hash: str | None = None
+    etag: str | None = None
+    artifact_uri: str | None = None
+    parser_version: str | None = None
+    fetched_at: datetime | None = None
+    last_verified_at: datetime | None = None
+    metadata_json: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column("metadata", JSON)
+    )
+
+
+class ContactEndpoint(SQLModel, table=True):
+    __tablename__ = "contacts"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    organization_id: str | None = Field(default=None, foreign_key="organizations.id", index=True)
+    domain_id: str | None = Field(default=None, foreign_key="domains.id", index=True)
+    contact_type: str = Field(index=True)
+    value: str
+    value_normalized: str = Field(index=True)
+    source_type: str
+    source_url: str | None = None
+    is_role_account: bool = False
+    confidence: float = 0.0
+    first_seen: datetime = Field(default_factory=datetime.utcnow)
+    last_seen: datetime = Field(default_factory=datetime.utcnow)
+    last_verified_at: datetime | None = None
+    metadata_json: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column("metadata", JSON)
+    )
+
+
+class SourceObservation(SQLModel, table=True):
+    __tablename__ = "source_observations"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    raw_fetch_id: str = Field(foreign_key="raw_fetches.id", index=True)
+    asset_id: str | None = Field(default=None, foreign_key="assets.id", index=True)
+    domain_id: str | None = Field(default=None, foreign_key="domains.id", index=True)
+    organization_id: str | None = Field(default=None, foreign_key="organizations.id")
+    asn_id: str | None = Field(default=None, foreign_key="asns.id")
+    contact_id: str | None = Field(default=None, foreign_key="contacts.id")
+    evidence_type: str = Field(index=True)
+    raw_value: str | None = None
+    normalized_value: str | None = None
+    observed_at: datetime = Field(default_factory=datetime.utcnow)
+    last_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    weight: float = 0.0
+    confidence: float = 0.0
+    metadata_json: dict[str, Any] = Field(
+        default_factory=dict, sa_column=Column("metadata", JSON)
+    )
+
+
+class OrgCandidate(SQLModel, table=True):
+    __tablename__ = "org_candidates"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    asset_id: str = Field(foreign_key="assets.id", index=True)
+    organization_id: str | None = Field(default=None, foreign_key="organizations.id")
+    name: str
+    normalized_name: str
+    score: float = 0.0
+    org_conflict_penalty: float = 0.0
+    rationale: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_evaluated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("asset_id", "normalized_name", name="uq_org_candidates_asset_name"),
+    )
+
+
+class OrgResolution(SQLModel, table=True):
+    __tablename__ = "org_resolutions"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    asset_id: str = Field(foreign_key="assets.id", unique=True, index=True)
+    organization_id: str | None = Field(default=None, foreign_key="organizations.id", index=True)
+    winning_org_candidate_id: str | None = Field(default=None, foreign_key="org_candidates.id")
+    resolution_mode: str = "auto"
+    confidence: float = 0.0
+    rationale: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    resolved_at: datetime = Field(default_factory=datetime.utcnow)
+    reviewed_at: datetime | None = None
+    reviewer_note: str | None = None
+
+
+class LeadRecord(SQLModel, table=True):
+    __tablename__ = "lead_records"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    asset_id: str = Field(foreign_key="assets.id", unique=True, index=True)
+    org_resolution_id: str | None = Field(default=None, foreign_key="org_resolutions.id")
+    organization_id: str | None = Field(default=None, foreign_key="organizations.id", index=True)
+    primary_contact_id: str | None = Field(default=None, foreign_key="contacts.id")
+    confidence_score: float = 0.0
+    org_confidence: float = 0.0
+    contact_quality: float = 0.0
+    route_legitimacy: float = 0.0
+    org_conflict_penalty: float = 0.0
+    status: str = Field(default="new", index=True)
+    recommended_route: str | None = None
+    notes: str | None = None
+    scorer_version: str | None = None
+    resolver_version: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    last_resolved_at: datetime | None = None
+
+
+class LeadContactCandidate(SQLModel, table=True):
+    __tablename__ = "lead_contact_candidates"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    lead_record_id: str = Field(foreign_key="lead_records.id", index=True)
+    contact_id: str = Field(foreign_key="contacts.id")
+    route: str
+    rank: int
+    score: float = 0.0
+    org_confidence: float = 0.0
+    contact_quality: float = 0.0
+    route_legitimacy: float = 0.0
+    org_conflict_penalty: float = 0.0
+    rationale: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    last_evaluated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("lead_record_id", "contact_id", "route", name="uq_lead_contact_candidates"),
+        CheckConstraint("rank > 0", name="ck_lead_contact_candidates_rank_positive"),
+    )
+
+
+class CampaignCluster(SQLModel, table=True):
+    __tablename__ = "campaign_clusters"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    cluster_type: str
+    cluster_key: str
+    geo_region: str | None = None
+    org_density: float | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("cluster_type", "cluster_key", name="uq_campaign_clusters_key"),
+    )
+
+
+class CampaignClusterMember(SQLModel, table=True):
+    __tablename__ = "campaign_cluster_members"
+
+    cluster_id: str = Field(foreign_key="campaign_clusters.id", primary_key=True)
+    lead_record_id: str = Field(foreign_key="lead_records.id", primary_key=True)
+    membership_score: float = 0.0
+
+
+class EnrichmentRun(SQLModel, table=True):
+    __tablename__ = "enrichment_runs"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    asset_id: str = Field(foreign_key="assets.id", unique=True, index=True)
+    rdap_status: str = "pending"
+    ptr_status: str = "pending"
+    tls_ct_status: str = "pending"
+    security_txt_status: str = "pending"
+    contact_page_status: str = "pending"
+    last_error_by_source: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    source_versions: dict[str, str] = Field(default_factory=dict, sa_column=Column(JSON))
+    last_started_at: datetime | None = None
+    last_finished_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class EnrichmentJob(SQLModel, table=True):
+    __tablename__ = "enrichment_jobs"
+
+    id: str = Field(default_factory=_uuid_str, primary_key=True)
+    job_type: str = Field(index=True)
+    status: str = Field(index=True)
+    asset_id: str | None = Field(default=None, foreign_key="assets.id", index=True)
+    lead_record_id: str | None = Field(default=None, foreign_key="lead_records.id", index=True)
+    payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    attempts: int = 0
+    scheduled_at: datetime = Field(default_factory=datetime.utcnow)
+    run_after: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    worker_hint: str | None = None
+    last_error: str | None = None
 
 
 engine = None

@@ -56,9 +56,11 @@ class GeoService:
 
             tmp_path = self.data_path.with_suffix(self.data_path.suffix + ".part")
             logger.info("Downloading local GeoIP database to %s", self.data_path)
-            with urllib.request.urlopen(self.data_url, timeout=self.timeout) as response:
-                with tmp_path.open("wb") as output:
-                    shutil.copyfileobj(response, output)
+            with (
+                urllib.request.urlopen(self.data_url, timeout=self.timeout) as response,
+                tmp_path.open("wb") as output,
+            ):
+                shutil.copyfileobj(response, output)
             os.replace(tmp_path, self.data_path)
 
     def _get_geoip(self) -> GeoIP2Fast:
@@ -80,35 +82,59 @@ class GeoService:
                 return None
         return None
 
+    def lookup_ip(self, ip: str) -> dict[str, object]:
+        try:
+            parsed_ip = ipaddress.ip_address(ip)
+        except ValueError:
+            return {"status": "failed", "reason": "invalid ip address"}
+
+        if not parsed_ip.is_global:
+            return {"status": "skipped", "reason": "private or reserved network"}
+
+        geoip = self._get_geoip()
+        result = geoip.lookup(str(parsed_ip))
+
+        if getattr(result, "is_private", False):
+            return {"status": "skipped", "reason": "private or reserved network"}
+
+        country = getattr(result, "country_name", "") or ""
+        city = getattr(result, "city", None)
+        city_name = getattr(city, "name", "") if city is not None else ""
+        latitude = self._coerce_float(getattr(city, "latitude", None) if city is not None else None)
+        longitude = self._coerce_float(
+            getattr(city, "longitude", None) if city is not None else None
+        )
+
+        if country.startswith("<") or country in {"", "--"}:
+            return {"status": "failed", "reason": "host not found in local geo database"}
+
+        return {
+            "status": "resolved",
+            "reason": "ok",
+            "country": country,
+            "city": city_name or None,
+            "lat": latitude,
+            "lon": longitude,
+        }
+
     async def geocode_host(self, host: Host) -> dict[str, str]:
         if not self.should_geocode(host):
             return {"status": "skipped", "reason": "host does not need geocoding"}
 
         for attempt in range(self.retries):
             try:
-                geoip = self._get_geoip()
-                result = geoip.lookup(host.ip)
+                result = self.lookup_ip(host.ip)
 
-                if getattr(result, "is_private", False):
-                    return {"status": "skipped", "reason": "private or reserved network"}
+                if result.get("status") != "resolved":
+                    return {
+                        "status": str(result.get("status", "failed")),
+                        "reason": str(result.get("reason", "lookup failed")),
+                    }
 
-                country = getattr(result, "country_name", "") or ""
-                city = getattr(result, "city", None)
-                city_name = getattr(city, "name", "") if city is not None else ""
-                latitude = self._coerce_float(
-                    getattr(city, "latitude", None) if city is not None else None
-                )
-                longitude = self._coerce_float(
-                    getattr(city, "longitude", None) if city is not None else None
-                )
-
-                if country.startswith("<") or country in {"", "--"}:
-                    return {"status": "failed", "reason": "host not found in local geo database"}
-
-                host.geo_country = country
-                host.geo_city = city_name or host.geo_city
-                host.geo_lat = latitude
-                host.geo_lon = longitude
+                host.geo_country = str(result.get("country") or "") or host.geo_country
+                host.geo_city = str(result.get("city") or "") or host.geo_city
+                host.geo_lat = self._coerce_float(result.get("lat"))
+                host.geo_lon = self._coerce_float(result.get("lon"))
 
                 if not host.geo_country:
                     return {"status": "failed", "reason": "lookup returned no usable geography"}

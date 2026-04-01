@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import subprocess
@@ -27,6 +28,9 @@ DEFAULT_TOR_SCAN_MAX_HOSTS = 4096
 DEFAULT_TOR_SCAN_CONCURRENCY = 32
 TOR_CONNECT_STRATEGY = "tor-connect"
 DEFAULT_POLICY_SNAPSHOT_HASH = hashlib.sha256(b"policy:implicit-default-v1").hexdigest()
+ACO_BLOCK_TOR_MAX_HOSTS = 256  # Smaller cap for ACO block scanning to keep it fast
+TOR_SAMPLE_MODE_SEQUENTIAL = "sequential"
+TOR_SAMPLE_MODE_SPREAD = "spread"
 
 
 def normalize_scan_strategy_name(strategy: str) -> str:
@@ -44,6 +48,15 @@ def build_exclude_snapshot_hash(exclude_file: str | Sequence[str]) -> str:
         )
     payload = "\n".join(excludes).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def normalize_tor_sample_mode(mode: str | None) -> str:
+    normalized = (mode or TOR_SAMPLE_MODE_SEQUENTIAL).strip().lower()
+    if normalized in {"random", "distributed", "rotating"}:
+        return TOR_SAMPLE_MODE_SPREAD
+    if normalized not in {TOR_SAMPLE_MODE_SEQUENTIAL, TOR_SAMPLE_MODE_SPREAD}:
+        return TOR_SAMPLE_MODE_SEQUENTIAL
+    return normalized
 
 
 def create_workflow_for_scan(
@@ -84,6 +97,7 @@ def create_workflow_for_aco_block(
     *,
     cidr: str,
     port: str,
+    strategy: str,
     exclude_snapshot_hash: str,
 ) -> Workflow:
     workflow_id = str(uuid.uuid4())
@@ -93,13 +107,14 @@ def create_workflow_for_aco_block(
         workflow_kind="continuous-block",
         target=cidr,
         port=port,
-        strategy="masscan",
+        strategy=strategy,
         status="pending",
         exclude_snapshot_hash=exclude_snapshot_hash,
         policy_snapshot_hash=DEFAULT_POLICY_SNAPSHOT_HASH,
-        requested_config_json=json.dumps({"cidr": cidr, "port": port, "strategy": "masscan"}),
+        requested_config_json=json.dumps({"cidr": cidr, "port": port, "strategy": strategy}),
         summary_json=json.dumps({}),
         created_at=scan.started_at or datetime.utcnow(),
+        started_at=scan.started_at or datetime.utcnow(),
     )
     session.add(workflow)
     session.commit()
@@ -200,29 +215,98 @@ def _iter_network_hosts(network: ipaddress.IPv4Network):
     yield from network.hosts()
 
 
+def _network_host_window(network: ipaddress.IPv4Network) -> tuple[int, int]:
+    if network.prefixlen >= 31:
+        return int(network.network_address), network.num_addresses
+
+    usable_hosts = max(network.num_addresses - 2, 0)
+    return int(network.network_address) + 1, usable_hosts
+
+
+def _is_excluded_address(
+    address: ipaddress.IPv4Address, exclude_networks: Sequence[ipaddress.IPv4Network]
+) -> bool:
+    return any(address in exclude for exclude in exclude_networks)
+
+
+def _iter_spread_network_hosts(
+    network: ipaddress.IPv4Network,
+    *,
+    exclude_networks: Sequence[ipaddress.IPv4Network],
+    limit: int,
+    sample_seed: str | None,
+    avoid_hosts: Sequence[str] | None = None,
+):
+    first_host_int, usable_hosts = _network_host_window(network)
+    if usable_hosts <= 0 or limit <= 0:
+        return
+
+    sample_slots = min(limit, usable_hosts)
+    seed_prefix = sample_seed or network.with_prefixlen
+    avoided_host_ints = {int(ipaddress.IPv4Address(host)) for host in (avoid_hosts or ())}
+
+    for slot in range(sample_slots):
+        start_offset = math.floor((slot * usable_hosts) / sample_slots)
+        end_offset = math.floor(((slot + 1) * usable_hosts) / sample_slots)
+        bucket_size = max(end_offset - start_offset, 1)
+        slot_seed = hashlib.sha256(f"{seed_prefix}:{slot}".encode()).digest()
+        initial_offset = int.from_bytes(slot_seed[:8], "big") % bucket_size
+        fallback_address: ipaddress.IPv4Address | None = None
+
+        for attempt in range(bucket_size):
+            offset = start_offset + ((initial_offset + attempt) % bucket_size)
+            address = ipaddress.IPv4Address(first_host_int + offset)
+            if _is_excluded_address(address, exclude_networks):
+                continue
+            if int(address) in avoided_host_ints:
+                fallback_address = fallback_address or address
+                continue
+            yield address
+            break
+        else:
+            if fallback_address is not None:
+                yield fallback_address
+
+
 def build_allowed_host_targets(
     target: str,
     exclude_file: str | Sequence[str],
     max_hosts: int | None = None,
+    sample_mode: str | None = None,
+    sample_seed: str | None = None,
+    avoid_hosts: Sequence[str] | None = None,
 ) -> list[str]:
     target_networks = _parse_target_segments(target)
     exclude_networks = _load_required_exclude_networks(exclude_file)
     limit = max_hosts or DEFAULT_TOR_SCAN_MAX_HOSTS
+    normalized_sample_mode = normalize_tor_sample_mode(sample_mode)
 
     allowed_hosts: list[str] = []
     for target_network in target_networks:
         if any(target_network.subnet_of(exclude) for exclude in exclude_networks):
             continue
 
-        for address in _iter_network_hosts(target_network):
-            if any(address in exclude for exclude in exclude_networks):
+        if normalized_sample_mode == TOR_SAMPLE_MODE_SPREAD:
+            host_iterator = _iter_spread_network_hosts(
+                target_network,
+                exclude_networks=exclude_networks,
+                limit=limit - len(allowed_hosts),
+                sample_seed=f"{sample_seed or target}:{target_network.with_prefixlen}",
+                avoid_hosts=avoid_hosts,
+            )
+        else:
+            host_iterator = _iter_network_hosts(target_network)
+
+        for address in host_iterator:
+            if normalized_sample_mode != TOR_SAMPLE_MODE_SPREAD and _is_excluded_address(
+                address, exclude_networks
+            ):
                 continue
             allowed_hosts.append(str(address))
-            if len(allowed_hosts) > limit:
-                raise RuntimeError(
-                    f"Tor scan target expands to more than {limit} allowed hosts after exclusions. "
-                    "Use smaller CIDR blocks or raise TOR_SCAN_MAX_HOSTS deliberately."
-                )
+            if len(allowed_hosts) >= limit:
+                break
+        if len(allowed_hosts) >= limit:
+            break
 
     if not allowed_hosts:
         raise RuntimeError(
@@ -262,6 +346,9 @@ class ScanRequest:
     strategy: str
     tor_max_hosts: int | None = None
     tor_concurrency: int | None = None
+    tor_sample_mode: str | None = None
+    tor_sample_seed: str | None = None
+    tor_seen_hosts: tuple[str, ...] | None = None
     shodan_query: str | None = None
     shodan_page_limit: int | None = None
     shodan_max_matches: int | None = None
@@ -289,6 +376,8 @@ class ScanExecutionResult:
     attempted_hosts: int
     discovered_hosts: int
     stats: dict[str, object]
+    sampled_hosts: list[str] | None = None
+    discovered_targets: list[str] | None = None
 
 
 class ScanStrategy(ABC):
@@ -381,6 +470,8 @@ class TorScanStrategy(ScanStrategy):
     output_suffix = ".txt"
 
     def execute(self, context: ScanContext) -> ScanExecutionResult:
+        seen_hosts = tuple(context.request.tor_seen_hosts or ())
+        seen_host_set = set(seen_hosts)
         allowed_hosts = build_allowed_host_targets(
             context.request.target,
             context.exclude_file,
@@ -389,21 +480,49 @@ class TorScanStrategy(ScanStrategy):
                 or settings.tor_scan_max_hosts
                 or int(os.environ.get("TOR_SCAN_MAX_HOSTS", DEFAULT_TOR_SCAN_MAX_HOSTS))
             ),
+            sample_mode=context.request.tor_sample_mode,
+            sample_seed=context.request.tor_sample_seed,
+            avoid_hosts=seen_hosts,
         )
-        discovered_hosts = asyncio.run(self._run_probe_scan(context, allowed_hosts))
+        sample_mode = normalize_tor_sample_mode(context.request.tor_sample_mode)
+        new_hosts = sum(1 for host in allowed_hosts if host not in seen_host_set)
+        revisited_hosts = len(allowed_hosts) - new_hosts
+        discovered_host_ips = asyncio.run(
+            self._run_probe_scan(
+                context,
+                allowed_hosts,
+                previously_sampled_hosts=len(seen_host_set),
+                new_hosts=new_hosts,
+                revisited_hosts=revisited_hosts,
+            )
+        )
         return ScanExecutionResult(
             attempted_hosts=len(allowed_hosts),
-            discovered_hosts=discovered_hosts,
+            discovered_hosts=len(discovered_host_ips),
             stats={
                 "strategy": self.name,
                 "target": context.request.target,
                 "port": context.request.port,
                 "attempted_hosts": len(allowed_hosts),
-                "discovered_hosts": discovered_hosts,
+                "discovered_hosts": len(discovered_host_ips),
+                "sample_mode": sample_mode,
+                "previously_sampled_hosts": len(seen_host_set),
+                "new_hosts": new_hosts,
+                "revisited_hosts": revisited_hosts,
             },
+            sampled_hosts=allowed_hosts,
+            discovered_targets=discovered_host_ips,
         )
 
-    async def _run_probe_scan(self, context: ScanContext, allowed_hosts: list[str]) -> int:
+    async def _run_probe_scan(
+        self,
+        context: ScanContext,
+        allowed_hosts: list[str],
+        *,
+        previously_sampled_hosts: int,
+        new_hosts: int,
+        revisited_hosts: int,
+    ) -> list[str]:
         output_path = Path(context.paths.output_file)
         log_path = Path(context.paths.log_file)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -428,13 +547,17 @@ class TorScanStrategy(ScanStrategy):
                     f"port={context.request.port}",
                     f"allowed_hosts={len(allowed_hosts)}",
                     f"concurrency={concurrency}",
+                    f"sample_mode={normalize_tor_sample_mode(context.request.tor_sample_mode)}",
+                    f"previously_sampled_hosts={previously_sampled_hosts}",
+                    f"new_hosts={new_hosts}",
+                    f"revisited_hosts={revisited_hosts}",
                 ]
             )
             + "\n"
         )
 
         semaphore = asyncio.Semaphore(concurrency)
-        found_hosts: list[str] = []
+        found_host_ips: list[str] = []
 
         async with httpx.AsyncClient(
             verify=False,
@@ -450,7 +573,7 @@ class TorScanStrategy(ScanStrategy):
                         try:
                             response = await client.get(url, headers={"Accept": "application/json"})
                             if response.status_code == 200:
-                                found_hosts.append(f"{ip}:{context.request.port}")
+                                found_host_ips.append(ip)
                                 return
                             if 400 <= response.status_code < 500:
                                 return
@@ -461,10 +584,13 @@ class TorScanStrategy(ScanStrategy):
 
             await asyncio.gather(*(probe(ip) for ip in allowed_hosts))
 
-        output_path.write_text("\n".join(found_hosts) + ("\n" if found_hosts else ""))
+        output_path.write_text(
+            "\n".join(f"{ip}:{context.request.port}" for ip in found_host_ips)
+            + ("\n" if found_host_ips else "")
+        )
         with log_path.open("a") as log_handle:
-            log_handle.write(f"discovered_hosts={len(found_hosts)}\n")
-        return len(found_hosts)
+            log_handle.write(f"discovered_hosts={len(found_host_ips)}\n")
+        return found_host_ips
 
 
 class ShodanScanStrategy(ScanStrategy):
@@ -618,6 +744,8 @@ class ScanService:
             "strategy": strategy.name,
             "tor_max_hosts": request.tor_max_hosts,
             "tor_concurrency": request.tor_concurrency,
+            "tor_sample_mode": request.tor_sample_mode,
+            "tor_sample_seed": request.tor_sample_seed,
             "shodan_query": request.shodan_query,
             "shodan_page_limit": request.shodan_page_limit,
             "shodan_max_matches": request.shodan_max_matches,
@@ -639,6 +767,8 @@ class ScanService:
                     "policy_snapshot_hash": DEFAULT_POLICY_SNAPSHOT_HASH,
                     "tor_max_hosts": request.tor_max_hosts,
                     "tor_concurrency": request.tor_concurrency,
+                    "tor_sample_mode": request.tor_sample_mode,
+                    "tor_sample_seed": request.tor_sample_seed,
                     "shodan_query": request.shodan_query,
                     "shodan_page_limit": request.shodan_page_limit,
                     "shodan_max_matches": request.shodan_max_matches,
@@ -695,6 +825,8 @@ class ScanService:
         shodan_max_matches: int | None = None,
         shodan_max_queries: int | None = None,
         shodan_query_max_length: int | None = None,
+        tor_sample_mode: str | None = None,
+        tor_sample_seed: str | None = None,
     ) -> dict:
         request = ScanRequest(
             target=target,
@@ -704,6 +836,8 @@ class ScanService:
             strategy=strategy,
             tor_max_hosts=tor_max_hosts,
             tor_concurrency=tor_concurrency,
+            tor_sample_mode=tor_sample_mode,
+            tor_sample_seed=tor_sample_seed,
             shodan_query=shodan_query,
             shodan_page_limit=shodan_page_limit,
             shodan_max_matches=shodan_max_matches,
@@ -872,6 +1006,16 @@ class ScanService:
                 tor_concurrency=(
                     int(mapping.get("tor_concurrency"))
                     if mapping.get("tor_concurrency") is not None
+                    else None
+                ),
+                tor_sample_mode=(
+                    str(mapping.get("tor_sample_mode"))
+                    if mapping.get("tor_sample_mode") is not None
+                    else None
+                ),
+                tor_sample_seed=(
+                    str(mapping.get("tor_sample_seed"))
+                    if mapping.get("tor_sample_seed") is not None
                     else None
                 ),
                 shodan_query=(

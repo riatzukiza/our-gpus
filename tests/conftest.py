@@ -1,6 +1,6 @@
 import os
 import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,9 +12,9 @@ sys.modules["worker.celery_app"] = MagicMock()
 sys.modules["worker.celery_app"].celery_app = mock_celery
 sys.modules["worker.tasks"] = MagicMock()
 
-from app.config import settings
-from app.db import get_session
-from app.main import app
+from app.config import settings  # noqa: E402
+from app.db import get_session  # noqa: E402
+from app.main import app  # noqa: E402
 
 # Use file-based SQLite for better CI compatibility and shared access
 TEST_DATABASE_URL = "sqlite:///./test_ci.db"
@@ -28,7 +28,32 @@ def test_engine():
         os.unlink("./test_ci.db")
 
     # Import all models to ensure they're registered
-    from app.db import Host, HostModel, Model, Probe, Scan, TaskJob, Workflow, WorkflowStageReceipt  # noqa: F401
+    from app.db import (  # noqa: F401
+        Asset,
+        AssetDomain,
+        AutonomousSystem,
+        CampaignCluster,
+        CampaignClusterMember,
+        ContactEndpoint,
+        DomainRecord,
+        EnrichmentJob,
+        EnrichmentRun,
+        Host,
+        HostModel,
+        LeadContactCandidate,
+        LeadRecord,
+        Model,
+        Organization,
+        OrgCandidate,
+        OrgResolution,
+        Probe,
+        RawFetch,
+        Scan,
+        SourceObservation,
+        TaskJob,
+        Workflow,
+        WorkflowStageReceipt,
+    )
 
     engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False}, echo=False)
 
@@ -48,17 +73,49 @@ def session(test_engine):
     with Session(test_engine) as session:
         # Clean up all data before each test
         from app.db import (
+            Asset,
+            AssetDomain,
+            AutonomousSystem,
+            CampaignCluster,
+            CampaignClusterMember,
+            ContactEndpoint,
+            DomainRecord,
+            EnrichmentJob,
+            EnrichmentRun,
             Host,
             HostModel,
+            LeadContactCandidate,
+            LeadRecord,
             Model,
+            Organization,
+            OrgCandidate,
+            OrgResolution,
             Probe,
+            RawFetch,
             Scan,
+            SourceObservation,
             TaskJob,
             Workflow,
             WorkflowStageReceipt,
         )  # noqa: F401
 
         # Delete all data in correct order to respect foreign keys
+        session.exec(CampaignClusterMember.__table__.delete())
+        session.exec(CampaignCluster.__table__.delete())
+        session.exec(LeadContactCandidate.__table__.delete())
+        session.exec(LeadRecord.__table__.delete())
+        session.exec(OrgResolution.__table__.delete())
+        session.exec(OrgCandidate.__table__.delete())
+        session.exec(SourceObservation.__table__.delete())
+        session.exec(EnrichmentJob.__table__.delete())
+        session.exec(EnrichmentRun.__table__.delete())
+        session.exec(RawFetch.__table__.delete())
+        session.exec(ContactEndpoint.__table__.delete())
+        session.exec(AssetDomain.__table__.delete())
+        session.exec(Asset.__table__.delete())
+        session.exec(DomainRecord.__table__.delete())
+        session.exec(AutonomousSystem.__table__.delete())
+        session.exec(Organization.__table__.delete())
         session.exec(Probe.__table__.delete())
         session.exec(TaskJob.__table__.delete())
         session.exec(WorkflowStageReceipt.__table__.delete())

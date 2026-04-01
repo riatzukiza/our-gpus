@@ -1,7 +1,9 @@
 import csv
 import hashlib
 import io
+import ipaddress
 import json
+import math
 import os
 import secrets
 from datetime import datetime
@@ -33,8 +35,11 @@ from app.db import (
     get_session,
     init_db,
 )
+from app.geocode import GeoService
 from app.ingest import IngestService
-from app.masscan import TOR_CONNECT_STRATEGY, ScanService
+from app.lead_routes import router as lead_router
+from app.masscan import TOR_CONNECT_STRATEGY, ScanService, normalize_scan_strategy_name
+from app.masscan_aco import SchedulerConfig
 from app.probe import ProbeService
 from app.schemas import (
     HealthResponse,
@@ -58,11 +63,14 @@ from worker.celery_app import celery_app
 from worker.tasks import register_task_job
 
 app = FastAPI(title="our gpu API", version="1.0.0")
+app.include_router(lead_router)
 
 # Metrics
 ingest_counter = Counter("ingest_total", "Total ingests started")
 probe_counter = Counter("probe_total", "Total probes initiated", ["status"])
 request_duration = Histogram("request_duration_seconds", "Request duration", ["endpoint"])
+
+_ACO_GEO_LOOKUP_CACHE: dict[str, dict[str, object]] = {}
 
 # CORS
 app.add_middleware(
@@ -579,6 +587,7 @@ class MasscanResponse(BaseModel):
 
 
 class ACOStartRequest(BaseModel):
+    strategy: str | None = None
     port: str | None = None
     rate: int | None = None
     max_block_duration_s: float | None = None
@@ -586,6 +595,8 @@ class ACOStartRequest(BaseModel):
     breathing_room_s: float | None = None
     router_mac: str | None = None
     interface: str | None = None
+    tor_max_hosts: int | None = None
+    tor_concurrency: int | None = None
     aco_alpha: float | None = None
     aco_beta: float | None = None
     aco_decay: float | None = None
@@ -603,6 +614,7 @@ class ShodanQueryPlanRequest(BaseModel):
 
 def _serialize_scheduler_config(config) -> dict:
     return {
+        "strategy": normalize_scan_strategy_name(config.strategy),
         "port": config.port,
         "rate": config.rate,
         "max_block_duration_s": config.max_block_duration_s,
@@ -624,11 +636,12 @@ async def get_admin_scanner_config(_: None = Depends(require_admin_api_key)):
     from app.masscan_aco import SchedulerConfig
 
     current = _aco_scheduler.config if _aco_scheduler else SchedulerConfig()
+    strategy = normalize_scan_strategy_name(current.strategy)
     return {
         "aco": _serialize_scheduler_config(current),
         "tor": {
-            "max_hosts": settings.tor_scan_max_hosts,
-            "concurrency": settings.tor_scan_concurrency,
+            "max_hosts": current.tor_max_hosts,
+            "concurrency": current.tor_concurrency,
         },
         "shodan": {
             "api_key_configured": bool(settings.shodan_api_key),
@@ -640,10 +653,10 @@ async def get_admin_scanner_config(_: None = Depends(require_admin_api_key)):
         },
         "scan": {
             "target": "0.0.0.0/0",
-            "port": "11434",
-            "rate": 100000,
-            "router_mac": "00:21:59:a0:cf:c1",
-            "strategy": TOR_CONNECT_STRATEGY,
+            "port": current.port,
+            "rate": current.rate,
+            "router_mac": current.router_mac,
+            "strategy": strategy,
         },
     }
 
@@ -1571,7 +1584,6 @@ _aco_scheduler: ACOMasscanScheduler | None = None
 
 def _on_aco_block_result(result: BlockScanResult) -> None:
     from app.masscan import (
-        DEFAULT_POLICY_SNAPSHOT_HASH,
         create_stage_receipt_for_workflow,
         create_workflow_for_aco_block,
     )
@@ -1608,8 +1620,13 @@ def _on_aco_block_result(result: BlockScanResult) -> None:
                 scan,
                 cidr=result.cidr,
                 port=config.port,
+                strategy=normalize_scan_strategy_name(config.strategy),
                 exclude_snapshot_hash=exclude_snapshot_hash,
             )
+            workflow.current_stage = "discover"
+            workflow.started_at = result.started_at
+            session.add(workflow)
+            session.commit()
 
             create_stage_receipt_for_workflow(
                 session,
@@ -1621,13 +1638,78 @@ def _on_aco_block_result(result: BlockScanResult) -> None:
                 evidence_refs=[result.log_file, result.output_file],
             )
 
+            if not result.success:
+                failure_message = result.error or "ACO block scan failed"
+                scan.status = "failed"
+                scan.completed_at = result.completed_at or datetime.utcnow()
+                scan.error_message = failure_message
+                scan.stats_json = json.dumps(
+                    {
+                        "success": result.hosts_found,
+                        "failed": 0,
+                        "cidr": result.cidr,
+                        "duration_ms": result.duration_ms,
+                        "error": failure_message,
+                    }
+                )
+                workflow.status = "failed"
+                workflow.last_error = failure_message
+                workflow.completed_at = result.completed_at or datetime.utcnow()
+                create_stage_receipt_for_workflow(
+                    session,
+                    workflow.workflow_id,
+                    stage_name="discover",
+                    status="failed",
+                    input_refs=[result.cidr, config.port],
+                    output_refs=[result.output_file],
+                    metrics={"attempted_hosts": 0, "discovered_hosts": result.hosts_found},
+                    evidence_refs=[result.log_file, result.output_file],
+                    error=failure_message,
+                )
+                session.commit()
+                return
+
+            if not Path(result.output_file).exists():
+                missing_output_error = (
+                    f"Scan completed without producing results file: {result.output_file}"
+                )
+                scan.status = "failed"
+                scan.completed_at = result.completed_at or datetime.utcnow()
+                scan.error_message = missing_output_error
+                scan.stats_json = json.dumps(
+                    {
+                        "success": result.hosts_found,
+                        "failed": 0,
+                        "cidr": result.cidr,
+                        "duration_ms": result.duration_ms,
+                        "error": missing_output_error,
+                    }
+                )
+                workflow.status = "failed"
+                workflow.last_error = missing_output_error
+                workflow.completed_at = result.completed_at or datetime.utcnow()
+                create_stage_receipt_for_workflow(
+                    session,
+                    workflow.workflow_id,
+                    stage_name="discover",
+                    status="failed",
+                    input_refs=[result.cidr, config.port],
+                    output_refs=[result.output_file],
+                    metrics={"attempted_hosts": 0, "discovered_hosts": result.hosts_found},
+                    evidence_refs=[result.log_file, result.output_file],
+                    error=missing_output_error,
+                )
+                session.commit()
+                return
+
             ingest = _IngestService(session)
             hosts_found = 0
+            failed_rows = 0
             try:
                 with open(result.output_file, "rb") as f:
                     records = list(ingest.parse_stream(f.read(), {}))
                     if records:
-                        success, failed = ingest.process_batch(
+                        success, failed_rows = ingest.process_batch(
                             records,
                             scan.id or 0,
                             auto_probe_new_hosts=True,
@@ -1661,7 +1743,7 @@ def _on_aco_block_result(result: BlockScanResult) -> None:
             scan.stats_json = json.dumps(
                 {
                     "success": hosts_found,
-                    "failed": 0,
+                    "failed": failed_rows,
                     "cidr": result.cidr,
                     "duration_ms": result.duration_ms,
                 }
@@ -1696,13 +1778,12 @@ def _on_aco_block_result(result: BlockScanResult) -> None:
             session.commit()
             _aco_logger.info("ACO block %s ingested: %d hosts", result.cidr, hosts_found)
 
-    except Exception as e:
+    except Exception:
         _aco_logger.exception("ACO block workflow failed for %s", result.cidr)
 
 
 def _aco_not_running_snapshot() -> dict:
     from app.aco import AntColony
-    from app.masscan_aco import SchedulerConfig
 
     config = SchedulerConfig()
     state_file = config.state_file
@@ -1711,7 +1792,7 @@ def _aco_not_running_snapshot() -> dict:
         if Path(state_file).exists():
             with open(state_file) as file_handle:
                 data = json.load(file_handle)
-            aco = AntColony.from_dict(data)
+            aco = AntColony.from_dict(data.get("aco", data))
             stats = aco.stats()
             top = aco.top_blocks(20)
             return {
@@ -1806,15 +1887,177 @@ def _get_aco_history(session: Session, limit: int = 20) -> list[dict]:
     return history
 
 
-def _get_host_geography(session: Session, limit: int = 20) -> dict:
-    country_rows = session.exec(
-        select(Host.geo_country, func.count(Host.id))
-        .where(Host.geo_country.is_not(None), Host.geo_country != "")
-        .group_by(Host.geo_country)
-        .order_by(func.count(Host.id).desc())
-        .limit(limit)
-    ).all()
+def _parse_cidr_prefix_len(cidr: str | None) -> int | None:
+    if not cidr or "/" not in cidr:
+        return None
 
+    try:
+        return int(cidr.rsplit("/", 1)[1])
+    except ValueError:
+        return None
+
+
+def _default_geography_prefix_len() -> int:
+    config = SchedulerConfig()
+    strategy = normalize_scan_strategy_name(config.strategy)
+    if strategy == TOR_CONNECT_STRATEGY:
+        return 16
+
+    from app.cidr_split import optimal_prefix_for_target_duration
+
+    return optimal_prefix_for_target_duration(
+        target_seconds=config.max_block_duration_s,
+        rate=config.rate,
+    )
+
+
+def _resolve_geography_prefix_len(session: Session, scheduler_snapshot: dict) -> int:
+    snapshot_prefix = scheduler_snapshot.get("prefix_len")
+    if isinstance(snapshot_prefix, int):
+        return snapshot_prefix
+
+    for block in scheduler_snapshot.get("top_blocks", []):
+        prefix_len = _parse_cidr_prefix_len(block.get("cidr"))
+        if prefix_len is not None:
+            return prefix_len
+
+    latest_scan = session.exec(
+        select(Scan)
+        .where(Scan.source_file.like("aco-block:%"))
+        .order_by(Scan.started_at.desc())
+        .limit(1)
+    ).first()
+    if latest_scan and latest_scan.source_file.startswith("aco-block:"):
+        prefix_len = _parse_cidr_prefix_len(latest_scan.source_file.split(":", 1)[1])
+        if prefix_len is not None:
+            return prefix_len
+
+    return _default_geography_prefix_len()
+
+
+def _collapse_ip_ranges(ip_values: list[str], limit: int = 12) -> list[str]:
+    unique_ips = sorted({ipaddress.ip_address(value) for value in ip_values})
+    collapsed = [str(network) for network in ipaddress.collapse_addresses(unique_ips)]
+    return collapsed[:limit]
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius_km = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(delta_phi / 2) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius_km * c
+
+
+def _summarize_geo_cluster(latitudes: list[float], longitudes: list[float]) -> dict[str, float]:
+    avg_lat = sum(latitudes) / len(latitudes)
+    avg_lon = sum(longitudes) / len(longitudes)
+    lat_min = min(latitudes)
+    lat_max = max(latitudes)
+    lon_min = min(longitudes)
+    lon_max = max(longitudes)
+
+    width_km = _haversine_km(avg_lat, lon_min, avg_lat, lon_max) if lon_min != lon_max else 0.0
+    height_km = _haversine_km(lat_min, avg_lon, lat_max, avg_lon) if lat_min != lat_max else 0.0
+    area_km2 = width_km * height_km
+
+    radius_km = 0.0
+    for latitude, longitude in zip(latitudes, longitudes, strict=False):
+        radius_km = max(radius_km, _haversine_km(avg_lat, avg_lon, latitude, longitude))
+
+    return {
+        "avg_lat": round(avg_lat, 4),
+        "avg_lon": round(avg_lon, 4),
+        "lat_min": round(lat_min, 4),
+        "lat_max": round(lat_max, 4),
+        "lon_min": round(lon_min, 4),
+        "lon_max": round(lon_max, 4),
+        "width_km": round(width_km, 2),
+        "height_km": round(height_km, 2),
+        "area_km2": round(area_km2, 2),
+        "radius_km": round(radius_km, 2),
+    }
+
+
+def _empty_geo_cluster() -> dict[str, float | None]:
+    return {
+        "avg_lat": None,
+        "avg_lon": None,
+        "lat_min": None,
+        "lat_max": None,
+        "lon_min": None,
+        "lon_max": None,
+        "width_km": 0.0,
+        "height_km": 0.0,
+        "area_km2": 0.0,
+        "radius_km": 0.0,
+    }
+
+
+def _load_aco_scan_memory() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    config = SchedulerConfig()
+
+    if _aco_scheduler is not None:
+        with _aco_scheduler._state_lock:
+            return (
+                {
+                    cidr: set(hosts)
+                    for cidr, hosts in getattr(_aco_scheduler, "block_sampled_hosts", {}).items()
+                },
+                {
+                    cidr: set(hosts)
+                    for cidr, hosts in getattr(_aco_scheduler, "block_discovered_hosts", {}).items()
+                },
+            )
+
+    try:
+        with open(config.state_file) as file_handle:
+            data = json.load(file_handle)
+    except FileNotFoundError:
+        return {}, {}
+    except Exception:
+        return {}, {}
+
+    sampled_hosts = data.get("block_sampled_hosts", {})
+    discovered_hosts = data.get("block_discovered_hosts", {})
+
+    return (
+        {
+            cidr: set(hosts)
+            for cidr, hosts in sampled_hosts.items()
+            if isinstance(hosts, list) and hosts
+        },
+        {
+            cidr: set(hosts)
+            for cidr, hosts in discovered_hosts.items()
+            if isinstance(hosts, list) and hosts
+        },
+    )
+
+
+def _lookup_geo_cached(geo_service: GeoService, ip: str) -> dict[str, object]:
+    cached = _ACO_GEO_LOOKUP_CACHE.get(ip)
+    if cached is not None:
+        return cached
+
+    result = geo_service.lookup_ip(ip)
+    _ACO_GEO_LOOKUP_CACHE[ip] = result
+    return result
+
+
+def _get_host_geography(
+    session: Session,
+    limit: int = 250,
+    *,
+    block_prefix_len: int,
+) -> dict:
     known_hosts = session.exec(
         select(func.count())
         .select_from(Host)
@@ -1829,6 +2072,7 @@ def _get_host_geography(session: Session, limit: int = 20) -> dict:
     try:
         host_rows = session.exec(
             select(
+                Host.id,
                 Host.ip,
                 Host.geo_country,
                 Host.geo_city,
@@ -1840,36 +2084,248 @@ def _get_host_geography(session: Session, limit: int = 20) -> dict:
     except OperationalError:
         host_rows = []
 
+    country_state: dict[str, dict[str, object]] = {}
+    block_state: dict[str, dict[str, object]] = {}
+    points: list[dict[str, object]] = []
+
+    def ensure_country(country_name: str) -> dict[str, object]:
+        return country_state.setdefault(
+            country_name,
+            {
+                "country": country_name,
+                "host_count": 0,
+                "online_host_count": 0,
+                "sampled_ip_count": 0,
+                "discovered_ip_count": 0,
+                "block_cidrs": set(),
+                "ip_values": set(),
+                "latitudes": [],
+                "longitudes": [],
+            },
+        )
+
+    def ensure_block(cidr: str, country_name: str | None = None) -> dict[str, object]:
+        network = ipaddress.ip_network(cidr, strict=False)
+        state = block_state.setdefault(
+            cidr,
+            {
+                "cidr": cidr,
+                "country": country_name or "",
+                "prefix_len": network.prefixlen,
+                "ip_start": str(network.network_address),
+                "ip_end": str(network.broadcast_address),
+                "host_count": 0,
+                "online_host_count": 0,
+                "sampled_ip_count": 0,
+                "discovered_ip_count": 0,
+                "sample_ips": set(),
+                "latitudes": [],
+                "longitudes": [],
+                "source": "hosts",
+            },
+        )
+        if country_name and not state["country"]:
+            state["country"] = country_name
+        return state
+
+    for _host_id, ip, country, city, lat, lon, host_status in host_rows:
+        if lat is None or lon is None:
+            continue
+
+        country_name = country or "Unknown"
+        latitude = float(lat)
+        longitude = float(lon)
+        host_entry = {
+            "ip": ip,
+            "country": country_name,
+            "city": city or "",
+            "lat": latitude,
+            "lon": longitude,
+            "status": host_status or "unknown",
+            "kind": "host",
+        }
+        points.append(host_entry)
+        country_entry = ensure_country(country_name)
+        country_entry["host_count"] = int(country_entry["host_count"]) + 1
+        if host_status == "online":
+            country_entry["online_host_count"] = int(country_entry["online_host_count"]) + 1
+        country_entry["ip_values"].add(ip)
+        country_entry["latitudes"].append(latitude)
+        country_entry["longitudes"].append(longitude)
+
+        block_cidr = str(ipaddress.ip_network(f"{ip}/{block_prefix_len}", strict=False))
+        country_entry["block_cidrs"].add(block_cidr)
+
+        block_entry = ensure_block(block_cidr, country_name)
+        block_entry["host_count"] = int(block_entry["host_count"]) + 1
+        if host_status == "online":
+            block_entry["online_host_count"] = int(block_entry["online_host_count"]) + 1
+        block_entry["sample_ips"].add(ip)
+        block_entry["latitudes"].append(latitude)
+        block_entry["longitudes"].append(longitude)
+
+    sampled_blocks, discovered_blocks = _load_aco_scan_memory()
+    if sampled_blocks:
+        geo_service = GeoService()
+
+        for cidr, sampled_ips in sampled_blocks.items():
+            sampled_ip_list = sorted(sampled_ips)
+            if not sampled_ip_list:
+                continue
+
+            discovered_ip_list = sorted(discovered_blocks.get(cidr, set()))
+            geo_candidates = list(dict.fromkeys(discovered_ip_list + sampled_ip_list[:6]))[:6]
+            country_name: str | None = None
+            latitudes: list[float] = []
+            longitudes: list[float] = []
+
+            for ip in geo_candidates:
+                geo_result = _lookup_geo_cached(geo_service, ip)
+                if geo_result.get("status") != "resolved":
+                    continue
+
+                if country_name is None and geo_result.get("country"):
+                    country_name = str(geo_result["country"])
+
+                latitude = geo_result.get("lat")
+                longitude = geo_result.get("lon")
+                if latitude is None or longitude is None:
+                    continue
+
+                latitudes.append(float(latitude))
+                longitudes.append(float(longitude))
+                points.append(
+                    {
+                        "ip": ip,
+                        "country": country_name or str(geo_result.get("country") or "Unknown"),
+                        "city": str(geo_result.get("city") or ""),
+                        "lat": float(latitude),
+                        "lon": float(longitude),
+                        "status": "sampled-hit" if ip in discovered_ip_list else "sampled",
+                        "kind": "sampled",
+                    }
+                )
+
+            if not country_name:
+                continue
+
+            country_entry = ensure_country(country_name)
+            country_entry["sampled_ip_count"] = int(country_entry["sampled_ip_count"]) + len(
+                sampled_ip_list
+            )
+            country_entry["discovered_ip_count"] = int(country_entry["discovered_ip_count"]) + len(
+                discovered_ip_list
+            )
+            country_entry["block_cidrs"].add(cidr)
+            country_entry["ip_values"].update(sampled_ip_list)
+            country_entry["latitudes"].extend(latitudes)
+            country_entry["longitudes"].extend(longitudes)
+
+            block_entry = ensure_block(cidr, country_name)
+            block_entry["sampled_ip_count"] = len(sampled_ip_list)
+            block_entry["discovered_ip_count"] = len(discovered_ip_list)
+            block_entry["sample_ips"].update(sampled_ip_list[:6])
+            block_entry["latitudes"].extend(latitudes)
+            block_entry["longitudes"].extend(longitudes)
+            block_entry["source"] = (
+                "mixed" if int(block_entry["host_count"]) > 0 else "scan-sampled"
+            )
+
+    country_details: list[dict[str, object]] = []
+    for country_name, entry in country_state.items():
+        country_latitudes = [float(value) for value in entry["latitudes"]]
+        country_longitudes = [float(value) for value in entry["longitudes"]]
+        geo_summary = (
+            _summarize_geo_cluster(country_latitudes, country_longitudes)
+            if country_latitudes and country_longitudes
+            else _empty_geo_cluster()
+        )
+        ip_values = sorted(str(value) for value in entry["ip_values"])
+        ip_ranges = _collapse_ip_ranges(ip_values) if ip_values else []
+
+        country_details.append(
+            {
+                "country": country_name,
+                "host_count": int(entry["host_count"]),
+                "online_host_count": int(entry["online_host_count"]),
+                "sampled_ip_count": int(entry["sampled_ip_count"]),
+                "discovered_ip_count": int(entry["discovered_ip_count"]),
+                "block_count": len(entry["block_cidrs"]),
+                "ip_ranges": ip_ranges,
+                "ip_range_count": len(ip_ranges),
+                **geo_summary,
+            }
+        )
+
+    blocks: list[dict[str, object]] = []
+    for cidr, entry in block_state.items():
+        if not entry["country"]:
+            continue
+
+        block_latitudes = [float(value) for value in entry["latitudes"]]
+        block_longitudes = [float(value) for value in entry["longitudes"]]
+        geo_summary = (
+            _summarize_geo_cluster(block_latitudes, block_longitudes)
+            if block_latitudes and block_longitudes
+            else _empty_geo_cluster()
+        )
+        blocks.append(
+            {
+                "cidr": cidr,
+                "country": str(entry["country"]),
+                "prefix_len": int(entry["prefix_len"]),
+                "ip_start": str(entry["ip_start"]),
+                "ip_end": str(entry["ip_end"]),
+                "host_count": int(entry["host_count"]),
+                "online_host_count": int(entry["online_host_count"]),
+                "sampled_ip_count": int(entry["sampled_ip_count"]),
+                "discovered_ip_count": int(entry["discovered_ip_count"]),
+                "sample_ips": sorted(str(value) for value in entry["sample_ips"])[:6],
+                "source": str(entry["source"]),
+                **geo_summary,
+            }
+        )
+
+    country_details.sort(
+        key=lambda entry: (
+            -max(int(entry["sampled_ip_count"]), int(entry["host_count"])),
+            str(entry["country"]),
+        )
+    )
+    blocks.sort(
+        key=lambda entry: (
+            str(entry["country"]),
+            -max(int(entry["sampled_ip_count"]), int(entry["host_count"])),
+            str(entry["cidr"]),
+        )
+    )
+
     return {
         "known_hosts": known_hosts,
         "unknown_hosts": unknown_hosts,
         "countries": [
             {
-                "country": country,
-                "count": count,
+                "country": str(entry["country"]),
+                "count": max(
+                    int(entry["sampled_ip_count"]),
+                    int(entry["host_count"]),
+                    int(entry["block_count"]),
+                ),
             }
-            for country, count in country_rows
-            if country
+            for entry in country_details[:limit]
+            if entry["country"]
         ],
-        "points": [
-            {
-                "ip": ip,
-                "country": country or "",
-                "city": city or "",
-                "lat": lat,
-                "lon": lon,
-                "status": status or "unknown",
-            }
-            for ip, country, city, lat, lon, status in host_rows
-            if lat is not None and lon is not None
-        ],
+        "points": points,
+        "blocks": blocks,
+        "country_details": country_details,
+        "block_prefix_len": block_prefix_len,
     }
 
 
 @app.get("/api/aco/dashboard")
 async def get_aco_dashboard(
     history_limit: int = Query(default=20, ge=1, le=100),
-    country_limit: int = Query(default=25, ge=1, le=100),
+    country_limit: int = Query(default=250, ge=1, le=300),
     session: Session = Depends(get_session),
     _: None = Depends(require_admin_api_key),
 ):
@@ -1878,12 +2334,17 @@ async def get_aco_dashboard(
         if _aco_scheduler
         else _aco_not_running_snapshot()
     )
+    block_prefix_len = _resolve_geography_prefix_len(session, scheduler)
 
     return {
         "status": scheduler["status"],
         "scheduler": scheduler,
         "history": _get_aco_history(session, history_limit),
-        "geography": _get_host_geography(session, country_limit),
+        "geography": _get_host_geography(
+            session,
+            country_limit,
+            block_prefix_len=block_prefix_len,
+        ),
     }
 
 
@@ -1991,6 +2452,13 @@ async def start_aco_scan(
 
     payload = request or ACOStartRequest()
     config = SchedulerConfig(
+        strategy=(
+            normalize_scan_strategy_name(payload.strategy)
+            if payload.strategy is not None
+            else normalize_scan_strategy_name(
+                os.environ.get("OUR_GPUS_DEFAULT_STRATEGY", TOR_CONNECT_STRATEGY)
+            )
+        ),
         port=payload.port if payload.port is not None else "11434",
         rate=payload.rate if payload.rate is not None else 100_000,
         max_block_duration_s=(
@@ -2009,6 +2477,16 @@ async def start_aco_scan(
             else os.environ.get("MASSCAN_INTERFACE", "eth0")
         ),
         exclude_file=settings.our_gpus_exclude_files,
+        tor_max_hosts=(
+            payload.tor_max_hosts
+            if payload.tor_max_hosts is not None
+            else settings.tor_scan_max_hosts
+        ),
+        tor_concurrency=(
+            payload.tor_concurrency
+            if payload.tor_concurrency is not None
+            else settings.tor_scan_concurrency
+        ),
         aco_alpha=payload.aco_alpha if payload.aco_alpha is not None else 0.6,
         aco_beta=payload.aco_beta if payload.aco_beta is not None else 0.4,
         aco_decay=payload.aco_decay if payload.aco_decay is not None else 0.05,

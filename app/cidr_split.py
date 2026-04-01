@@ -171,20 +171,108 @@ def write_combined_exclude_file(
     return str(path)
 
 
-def filter_blocks(
-    blocks: list[str],
-    excludes: list[str],
+def collapse_networks(nets: list[ipaddress.IPv4Network]) -> list[ipaddress.IPv4Network]:
+    """Collapse a list of networks into minimal set of supernet blocks."""
+    if not nets:
+        return []
+    return list(ipaddress.collapse_addresses(nets))
+
+
+def generate_scan_blocks(
+    prefix_len: int = 20,
+    exclude_file: str | Sequence[str] | None = None,
 ) -> list[str]:
-    """Remove blocks that overlap with exclude list."""
-    if not excludes:
-        return blocks
+    """Generate scan blocks efficiently by collapsing excludes first.
 
-    exclude_nets = [ipaddress.ip_network(cidr, strict=False) for cidr in excludes]
+    For large exclude lists (like cloud provider ranges), we collapse them
+    into larger supernets first, then filter blocks against the collapsed set.
+    """
+    resolved_paths = resolve_exclude_paths(exclude_file)
+    excludes_raw = load_exclude_list(resolved_paths)
+
+    if not excludes_raw:
+        return split_ipv4(prefix_len)
+
+    # Parse excludes
+    exclude_nets = []
+    for e in excludes_raw:
+        try:
+            net = ipaddress.ip_network(e, strict=False)
+            if net.version == 4:
+                exclude_nets.append(net)
+        except ValueError:
+            continue
+
+    if not exclude_nets:
+        return split_ipv4(prefix_len)
+
+    # Collapse excludes into larger supernets (much faster to check against)
+    collapsed_excludes = collapse_networks(exclude_nets)
+
+    # Generate all blocks at target prefix
+    blocks = split_ipv4(prefix_len)
+
+    # Filter against collapsed excludes (much fewer networks to check)
     filtered = []
-
     for block in blocks:
         block_net = ipaddress.ip_network(block, strict=False)
-        if any(block_net.overlaps(ex) for ex in exclude_nets):
+        if any(block_net.overlaps(ex) for ex in collapsed_excludes):
+            continue
+        filtered.append(block)
+
+    return filtered
+
+
+def collapse_networks(nets: list[ipaddress.IPv4Network]) -> list[ipaddress.IPv4Network]:
+    """Collapse a list of networks into minimal set of supernet blocks."""
+    if not nets:
+        return []
+
+    # Sort and collapse adjacent networks
+    nets.sort()
+    collapsed = list(ipaddress.collapse_addresses(nets))
+    return collapsed
+
+
+def generate_scan_blocks(
+    prefix_len: int = 20,
+    exclude_file: str | Sequence[str] | None = None,
+) -> list[str]:
+    """Generate scan blocks efficiently by collapsing excludes first.
+
+    For large exclude lists (like cloud provider ranges), we collapse them
+    into larger supernets first, then filter blocks against the collapsed set.
+    """
+    resolved_paths = resolve_exclude_paths(exclude_file)
+    excludes_raw = load_exclude_list(resolved_paths)
+
+    if not excludes_raw:
+        return split_ipv4(prefix_len)
+
+    # Parse and collapse excludes for efficient filtering
+    exclude_nets = []
+    for e in excludes_raw:
+        try:
+            net = ipaddress.ip_network(e, strict=False)
+            if net.version == 4:
+                exclude_nets.append(net)
+        except ValueError:
+            continue
+
+    if not exclude_nets:
+        return split_ipv4(prefix_len)
+
+    # Collapse excludes into larger supernets (much faster to check against)
+    collapsed_excludes = collapse_networks(exclude_nets)
+
+    # Generate all blocks at target prefix
+    blocks = split_ipv4(prefix_len)
+
+    # Filter against collapsed excludes (much fewer networks to check)
+    filtered = []
+    for block in blocks:
+        block_net = ipaddress.ip_network(block, strict=False)
+        if any(block_net.overlaps(ex) for ex in collapsed_excludes):
             continue
         filtered.append(block)
 

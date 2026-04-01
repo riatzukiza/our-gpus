@@ -1,0 +1,35 @@
+--- tests/conftest.py
++++ tests/conftest.py
+@@ -21,7 +21,7 @@ def test_engine():
+         os.unlink("./test_ci.db")
+ 
+     # Import all models to ensure they're registered
+-    from app.db import Host, HostModel, Model, Probe, Scan, TaskJob  # noqa: F401
++    from app.db import Host, HostModel, Model, Probe, Scan, TaskJob, Workflow, WorkflowStageReceipt  # noqa: F401
+ 
+     engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False}, echo=False)
+ 
+@@ -40,11 +40,22 @@ def session(test_engine):
+     """Create a test database session"""
+     with Session(test_engine) as session:
+         # Clean up all data before each test
+-        from app.db import Host, HostModel, Model, Probe, Scan, TaskJob  # noqa: F401
++        from app.db import (
++            Host,
++            HostModel,
++            Model,
++            Probe,
++            Scan,
++            TaskJob,
++            Workflow,
++            WorkflowStageReceipt,
++        )  # noqa: F401
+ 
+         # Delete all data in correct order to respect foreign keys
+         session.exec(Probe.__table__.delete())
+         session.exec(TaskJob.__table__.delete())
++        session.exec(WorkflowStageReceipt.__table__.delete())
++        session.exec(Workflow.__table__.delete())
+         session.exec(HostModel.__table__.delete())
+         session.exec(Scan.__table__.delete())
+         session.exec(Host.__table__.delete())
