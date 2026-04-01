@@ -86,6 +86,45 @@ def test_aco_dashboard_returns_history_and_geography(client, session, admin_head
     assert data["geography"]["country_details"][0]["ip_ranges"]
 
 
+def test_aco_dashboard_counts_country_only_hosts_without_coordinates(
+    client, session, admin_headers
+):
+    session.add(
+        Host(
+            ip="146.59.18.127",
+            port=11434,
+            status="online",
+            last_seen=datetime.utcnow(),
+            first_seen=datetime.utcnow(),
+            geo_country="France",
+            geo_city=None,
+            geo_lat=None,
+            geo_lon=None,
+        )
+    )
+    session.commit()
+
+    response = client.get("/api/aco/dashboard", headers=admin_headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    france = next(
+        detail for detail in data["geography"]["country_details"] if detail["country"] == "France"
+    )
+    france_block = next(
+        block for block in data["geography"]["blocks"] if block["cidr"] == "146.59.0.0/16"
+    )
+
+    assert data["geography"]["known_hosts"] == 1
+    assert france["host_count"] == 1
+    assert france["online_host_count"] == 1
+    assert france["discovered_ip_count"] == 1
+    assert france_block["host_count"] == 1
+    assert france_block["discovered_ip_count"] == 1
+    assert france_block["avg_lat"] is None
+    assert france_block["avg_lon"] is None
+
+
 def test_aco_dashboard_ignores_stale_non_block_state(tmp_path):
     config = SchedulerConfig(
         results_dir=str(tmp_path / "results"),

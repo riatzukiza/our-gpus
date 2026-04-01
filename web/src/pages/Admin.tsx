@@ -185,6 +185,9 @@ export default function Admin() {
   const recentResults = scheduler?.recent_results || [];
   const topBlocks = scheduler?.top_blocks || [];
   const celeryJobs = jobsData?.jobs || [];
+  const discoveredHosts =
+    probeStats?.total_hosts ??
+    ((geography?.known_hosts ?? 0) + (geography?.unknown_hosts ?? 0));
 
   const handleUnlock = async () => {
     const nextKey = apiKeyDraft.trim();
@@ -255,9 +258,9 @@ export default function Admin() {
       icon: Radar,
     },
     {
-      label: "Hosts Found",
-      value: numberFormatter.format(scheduler.stats.total_yield),
-      detail: `${numberFormatter.format(history.length)} recent persisted ingests`,
+      label: "Discovered Hosts",
+      value: numberFormatter.format(discoveredHosts),
+      detail: `${numberFormatter.format(scheduler.stats.total_yield)} ACO yield in scheduler memory`,
       icon: Database,
     },
     {

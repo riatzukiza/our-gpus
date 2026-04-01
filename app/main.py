@@ -2079,10 +2079,22 @@ def _get_host_geography(
                 Host.geo_lat,
                 Host.geo_lon,
                 Host.status,
-            ).where(Host.geo_lat.is_not(None), Host.geo_lon.is_not(None))
+            ).where(Host.geo_country.is_not(None), Host.geo_country != "")
         ).all()
     except OperationalError:
-        host_rows = []
+        basic_host_rows = session.exec(
+            select(
+                Host.id,
+                Host.ip,
+                Host.geo_country,
+                Host.geo_city,
+                Host.status,
+            ).where(Host.geo_country.is_not(None), Host.geo_country != "")
+        ).all()
+        host_rows = [
+            (host_id, ip, country, city, None, None, status)
+            for host_id, ip, country, city, status in basic_host_rows
+        ]
 
     country_state: dict[str, dict[str, object]] = {}
     block_state: dict[str, dict[str, object]] = {}
@@ -2096,7 +2108,7 @@ def _get_host_geography(
                 "host_count": 0,
                 "online_host_count": 0,
                 "sampled_ip_count": 0,
-                "discovered_ip_count": 0,
+                "discovered_ips": set(),
                 "block_cidrs": set(),
                 "ip_values": set(),
                 "latitudes": [],
@@ -2117,7 +2129,7 @@ def _get_host_geography(
                 "host_count": 0,
                 "online_host_count": 0,
                 "sampled_ip_count": 0,
-                "discovered_ip_count": 0,
+                "discovered_ips": set(),
                 "sample_ips": set(),
                 "latitudes": [],
                 "longitudes": [],
@@ -2129,10 +2141,27 @@ def _get_host_geography(
         return state
 
     for _host_id, ip, country, city, lat, lon, host_status in host_rows:
+        country_name = country or "Unknown"
+        country_entry = ensure_country(country_name)
+        country_entry["host_count"] = int(country_entry["host_count"]) + 1
+        if host_status == "online":
+            country_entry["online_host_count"] = int(country_entry["online_host_count"]) + 1
+        country_entry["ip_values"].add(ip)
+        country_entry["discovered_ips"].add(ip)
+
+        block_cidr = str(ipaddress.ip_network(f"{ip}/{block_prefix_len}", strict=False))
+        country_entry["block_cidrs"].add(block_cidr)
+
+        block_entry = ensure_block(block_cidr, country_name)
+        block_entry["host_count"] = int(block_entry["host_count"]) + 1
+        if host_status == "online":
+            block_entry["online_host_count"] = int(block_entry["online_host_count"]) + 1
+        block_entry["sample_ips"].add(ip)
+        block_entry["discovered_ips"].add(ip)
+
         if lat is None or lon is None:
             continue
 
-        country_name = country or "Unknown"
         latitude = float(lat)
         longitude = float(lon)
         host_entry = {
@@ -2145,22 +2174,8 @@ def _get_host_geography(
             "kind": "host",
         }
         points.append(host_entry)
-        country_entry = ensure_country(country_name)
-        country_entry["host_count"] = int(country_entry["host_count"]) + 1
-        if host_status == "online":
-            country_entry["online_host_count"] = int(country_entry["online_host_count"]) + 1
-        country_entry["ip_values"].add(ip)
         country_entry["latitudes"].append(latitude)
         country_entry["longitudes"].append(longitude)
-
-        block_cidr = str(ipaddress.ip_network(f"{ip}/{block_prefix_len}", strict=False))
-        country_entry["block_cidrs"].add(block_cidr)
-
-        block_entry = ensure_block(block_cidr, country_name)
-        block_entry["host_count"] = int(block_entry["host_count"]) + 1
-        if host_status == "online":
-            block_entry["online_host_count"] = int(block_entry["online_host_count"]) + 1
-        block_entry["sample_ips"].add(ip)
         block_entry["latitudes"].append(latitude)
         block_entry["longitudes"].append(longitude)
 
@@ -2213,9 +2228,7 @@ def _get_host_geography(
             country_entry["sampled_ip_count"] = int(country_entry["sampled_ip_count"]) + len(
                 sampled_ip_list
             )
-            country_entry["discovered_ip_count"] = int(country_entry["discovered_ip_count"]) + len(
-                discovered_ip_list
-            )
+            country_entry["discovered_ips"].update(discovered_ip_list)
             country_entry["block_cidrs"].add(cidr)
             country_entry["ip_values"].update(sampled_ip_list)
             country_entry["latitudes"].extend(latitudes)
@@ -2223,7 +2236,7 @@ def _get_host_geography(
 
             block_entry = ensure_block(cidr, country_name)
             block_entry["sampled_ip_count"] = len(sampled_ip_list)
-            block_entry["discovered_ip_count"] = len(discovered_ip_list)
+            block_entry["discovered_ips"].update(discovered_ip_list)
             block_entry["sample_ips"].update(sampled_ip_list[:6])
             block_entry["latitudes"].extend(latitudes)
             block_entry["longitudes"].extend(longitudes)
@@ -2249,7 +2262,7 @@ def _get_host_geography(
                 "host_count": int(entry["host_count"]),
                 "online_host_count": int(entry["online_host_count"]),
                 "sampled_ip_count": int(entry["sampled_ip_count"]),
-                "discovered_ip_count": int(entry["discovered_ip_count"]),
+                "discovered_ip_count": len(entry["discovered_ips"]),
                 "block_count": len(entry["block_cidrs"]),
                 "ip_ranges": ip_ranges,
                 "ip_range_count": len(ip_ranges),
@@ -2279,7 +2292,7 @@ def _get_host_geography(
                 "host_count": int(entry["host_count"]),
                 "online_host_count": int(entry["online_host_count"]),
                 "sampled_ip_count": int(entry["sampled_ip_count"]),
-                "discovered_ip_count": int(entry["discovered_ip_count"]),
+                "discovered_ip_count": len(entry["discovered_ips"]),
                 "sample_ips": sorted(str(value) for value in entry["sample_ips"])[:6],
                 "source": str(entry["source"]),
                 **geo_summary,

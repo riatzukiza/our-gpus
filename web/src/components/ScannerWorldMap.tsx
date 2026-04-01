@@ -17,7 +17,8 @@ export interface HostPoint {
   lat: number;
   lon: number;
   status: string;
-  kind?: "host" | "sampled";
+  kind?: "host" | "sampled" | "country-host";
+  count?: number;
 }
 
 export interface CountryDetail {
@@ -98,7 +99,11 @@ const MIN_MAP_WIDTH = 320;
 const MIN_BLOCK_RX = 8;
 const MIN_BLOCK_RY = 6;
 
-const getPointColor = (status: string) => {
+const getPointColor = (status: string, kind?: HostPoint["kind"]) => {
+  if (kind === "country-host") {
+    return "#34d399";
+  }
+
   switch (status) {
     case "online":
       return "#22c55e";
@@ -231,8 +236,69 @@ export default function ScannerWorldMap({
     ? (resolvedCountryByCode.get(selectedCodeUpper) ?? null)
     : null;
 
+  const exactHostCountryCounts = useMemo(() => {
+    const next = new Map<string, number>();
+
+    points.forEach((point) => {
+      if (point.kind === "sampled") {
+        return;
+      }
+
+      const meta = resolveCountryMeta(point.country);
+      if (!meta) {
+        return;
+      }
+
+      const code = meta.code.toUpperCase();
+      next.set(code, (next.get(code) ?? 0) + (point.count ?? 1));
+    });
+
+    return next;
+  }, [points]);
+
+  const fallbackCountryHostPoints = useMemo<HostPoint[]>(() => {
+    const next: HostPoint[] = [];
+
+    countryDetails.forEach((detail) => {
+      if (detail.host_count <= 0) {
+        return;
+      }
+
+      const meta = resolveCountryMeta(detail.country);
+      if (!meta || meta.lat === null || meta.lon === null) {
+        return;
+      }
+
+      const alreadyPlotted = exactHostCountryCounts.get(
+        meta.code.toUpperCase(),
+      ) ?? 0;
+      const remainingHosts = detail.host_count - alreadyPlotted;
+      if (remainingHosts <= 0) {
+        return;
+      }
+
+      next.push({
+        ip: `country-host:${meta.code}`,
+        country: detail.country,
+        city: "",
+        lat: meta.lat,
+        lon: meta.lon,
+        status: detail.online_host_count > 0 ? "online" : "unknown",
+        kind: "country-host",
+        count: remainingHosts,
+      });
+    });
+
+    return next;
+  }, [countryDetails, exactHostCountryCounts]);
+
+  const displayPoints = useMemo(
+    () => [...points, ...fallbackCountryHostPoints],
+    [fallbackCountryHostPoints, points],
+  );
+
   const projectedPoints = useMemo<ProjectedHostPoint[]>(() => {
-    return points
+    return displayPoints
       .map((point) => {
         const coordinates = projection([point.lon, point.lat]);
         if (!coordinates) {
@@ -253,7 +319,7 @@ export default function ScannerWorldMap({
         };
       })
       .filter((point): point is ProjectedHostPoint => point !== null);
-  }, [points, projection, selectedCodeUpper]);
+  }, [displayPoints, projection, selectedCodeUpper]);
 
   const projectedBlocks = useMemo<ProjectedBlock[]>(() => {
     return blocks
@@ -465,12 +531,14 @@ export default function ScannerWorldMap({
               height={mapHeight}
               viewBox={`0 0 ${mapWidth} ${mapHeight}`}
               aria-hidden="true"
+              style={{ pointerEvents: "none" }}
             >
               <g transform={overlayTransform}>
                 {projectedBlocks.map((block) => (
                   <g
                     key={`${block.country}-${block.cidr}`}
                     opacity={block.isCountrySelected ? 1 : 0.46}
+                    style={{ pointerEvents: "auto" }}
                     onClick={() => {
                       const meta = resolveCountryMeta(block.country);
                       if (meta) {
@@ -535,7 +603,21 @@ export default function ScannerWorldMap({
                 ))}
 
                 {projectedPoints.map((point) => {
-                  const color = getPointColor(point.status);
+                  const color = getPointColor(point.status, point.kind);
+                  const pointCount = point.count ?? 1;
+                  const outerRadius =
+                    point.kind === "country-host"
+                      ? clampRadius(5 + Math.log2(pointCount + 1) * 1.8, 5.5)
+                      : point.isSelected
+                        ? 5.5
+                        : 4.5;
+                  const innerRadius =
+                    point.kind === "country-host"
+                      ? clampRadius(2.8 + Math.log2(pointCount + 1) * 0.8, 3.2)
+                      : point.isSelected
+                        ? 3.3
+                        : 2.6;
+
                   return (
                     <g
                       key={`${point.ip}-${point.lat}-${point.lon}`}
@@ -546,14 +628,14 @@ export default function ScannerWorldMap({
                       <circle
                         cx={point.x}
                         cy={point.y}
-                        r={point.isSelected ? 5.5 : 4.5}
+                        r={outerRadius}
                         fill={color}
-                        opacity={0.18}
+                        opacity={point.kind === "country-host" ? 0.28 : 0.18}
                       />
                       <circle
                         cx={point.x}
                         cy={point.y}
-                        r={point.isSelected ? 3.3 : 2.6}
+                        r={innerRadius}
                         fill={color}
                         stroke="rgba(255,255,255,0.6)"
                         strokeWidth={0.8}
@@ -583,8 +665,9 @@ export default function ScannerWorldMap({
                 Host Points
               </div>
               <p className="text-xs text-slate-300">
-                Green = online, amber = timeout, sky = sampled IP geography,
-                violet = sampled IP that produced a hit.
+                Green = online, mint = country-level host geocode fallback,
+                amber = timeout, sky = sampled IP geography, violet = sampled
+                IP that produced a hit.
               </p>
             </div>
             <div className="rounded-lg border border-slate-700/70 bg-slate-900/80 p-3 text-sm text-slate-200">

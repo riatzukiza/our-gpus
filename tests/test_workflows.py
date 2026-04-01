@@ -3,8 +3,9 @@ from pathlib import Path
 from sqlmodel import select
 
 import app.masscan as masscan_module
-from app.db import Workflow, WorkflowStageReceipt
-from app.masscan import ScanExecutionResult, ScanRequest, ScanService, TOR_CONNECT_STRATEGY
+import worker.tasks as worker_tasks
+from app.db import Host, Workflow, WorkflowStageReceipt
+from app.masscan import TOR_CONNECT_STRATEGY, ScanExecutionResult, ScanRequest, ScanService
 
 
 def test_scan_service_creates_workflow_record(tmp_path: Path, session, monkeypatch):
@@ -42,6 +43,7 @@ def test_run_background_records_discover_receipts(tmp_path: Path, session, monke
     service.exclude_file = str(exclude_file)
     monkeypatch.setattr(service, "results_dir", tmp_path)
     monkeypatch.setattr(masscan_module, "_get_engine", lambda: session.get_bind())
+    monkeypatch.setattr(worker_tasks, "queue_host_probes", lambda *_args, **_kwargs: [])
 
     context = service._build_context(
         ScanRequest(
@@ -67,6 +69,9 @@ def test_run_background_records_discover_receipts(tmp_path: Path, session, monke
                 },
             )
 
+        def prepare_ingest_file(self, context):
+            return context.paths.output_file
+
     service._strategies[context.request.strategy] = FakeStrategy()
     service._run_background(context)
 
@@ -76,13 +81,18 @@ def test_run_background_records_discover_receipts(tmp_path: Path, session, monke
         .where(WorkflowStageReceipt.workflow_id == workflow.workflow_id)
         .order_by(WorkflowStageReceipt.started_at.asc())
     ).all()
+    hosts = session.exec(select(Host)).all()
 
     assert workflow is not None
     assert workflow.status == "completed"
     assert workflow.current_stage == "discover"
     assert workflow.summary["attempted_hosts"] == 4
     assert workflow.summary["discovered_hosts"] == 1
+    assert workflow.summary["ingested_hosts"] == 1
+    assert len(hosts) == 1
+    assert hosts[0].ip == "1.1.1.1"
     assert [receipt.status for receipt in receipts] == ["started", "completed"]
+    assert receipts[-1].metrics["ingested_hosts"] == 1
 
 
 def test_admin_workflow_endpoints_return_workflow_data(client, session, admin_headers):

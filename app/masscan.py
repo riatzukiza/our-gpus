@@ -937,7 +937,7 @@ class ScanService:
                         workflow.workflow_id,
                         context,
                         status="failed",
-                        metrics={"attempted_hosts": 0, "discovered_hosts": 0},
+                        metrics={"attempted_hosts": 0, "discovered_hosts": 0, "ingested_hosts": 0},
                         error=str(error),
                     )
                 session.commit()
@@ -946,12 +946,68 @@ class ScanService:
         with Session(engine) as session:
             scan = session.get(Scan, context.scan_id)
             workflow = self._get_workflow(session, context.scan_id)
+            ingested_hosts = 0
+            failed_rows = 0
+            try:
+                ingest_file = strategy.prepare_ingest_file(context)
+                ingest_path = Path(ingest_file)
+                if ingest_path.exists():
+                    from app.ingest import IngestService
+
+                    ingest = IngestService(session)
+                    with ingest_path.open("rb") as file_handle:
+                        records = list(ingest.parse_stream(file_handle.read(), {}))
+                    if records:
+                        ingested_hosts, failed_rows = ingest.process_batch(
+                            records,
+                            context.scan_id,
+                            auto_probe_new_hosts=True,
+                        )
+            except Exception as ingest_error:  # noqa: BLE001
+                if scan:
+                    scan.status = "failed"
+                    scan.completed_at = datetime.utcnow()
+                    scan.error_message = str(ingest_error)
+                    scan.stats_json = json.dumps(
+                        {
+                            **result.stats,
+                            "error": str(ingest_error),
+                        }
+                    )
+                    session.add(scan)
+                if workflow:
+                    workflow.status = "failed"
+                    workflow.current_stage = "discover"
+                    workflow.completed_at = datetime.utcnow()
+                    workflow.last_error = str(ingest_error)
+                    session.add(workflow)
+                    self._create_stage_receipt(
+                        session,
+                        workflow.workflow_id,
+                        context,
+                        status="failed",
+                        metrics={
+                            "attempted_hosts": result.attempted_hosts,
+                            "discovered_hosts": result.discovered_hosts,
+                            "ingested_hosts": ingested_hosts,
+                        },
+                        error=str(ingest_error),
+                    )
+                session.commit()
+                return
+
             if scan:
                 scan.status = "completed"
                 scan.completed_at = datetime.utcnow()
                 scan.total_rows = result.attempted_hosts
-                scan.processed_rows = result.discovered_hosts
-                scan.stats_json = json.dumps(result.stats)
+                scan.processed_rows = ingested_hosts if ingested_hosts else result.discovered_hosts
+                scan.stats_json = json.dumps(
+                    {
+                        **result.stats,
+                        "ingested_hosts": ingested_hosts,
+                        "failed_rows": failed_rows,
+                    }
+                )
                 session.add(scan)
             if workflow:
                 workflow.status = "completed"
@@ -961,9 +1017,11 @@ class ScanService:
                     {
                         "attempted_hosts": result.attempted_hosts,
                         "discovered_hosts": result.discovered_hosts,
+                        "ingested_hosts": ingested_hosts,
+                        "failed_rows": failed_rows,
                         "verified_hosts": 0,
                         "geocoded_hosts": 0,
-                        "emitted_nodes": 0,
+                        "emitted_nodes": ingested_hosts,
                         "emitted_edges": 0,
                         "classified_hosts": 0,
                         "alerts_created": 0,
@@ -978,6 +1036,7 @@ class ScanService:
                     metrics={
                         "attempted_hosts": result.attempted_hosts,
                         "discovered_hosts": result.discovered_hosts,
+                        "ingested_hosts": ingested_hosts,
                     },
                 )
             session.commit()
