@@ -48,6 +48,7 @@ from app.lead_schemas import (
     ResolveLeadRequest,
     SourceType,
 )
+from app.lead_services import LeadEnrichmentService, LeadResolveScoreService
 
 router = APIRouter(prefix="/api", tags=["lead-enrichment"])
 
@@ -506,6 +507,24 @@ def _serialize_job(job: EnrichmentJob) -> JobQueuedResponse:
     )
 
 
+def _mark_job_running(job: EnrichmentJob) -> None:
+    job.status = "running"
+    job.started_at = _utcnow()
+
+
+def _mark_job_finished(job: EnrichmentJob, payload: dict | None = None) -> None:
+    job.status = "completed"
+    job.finished_at = _utcnow()
+    if payload is not None:
+        job.payload = payload
+
+
+def _mark_job_failed(job: EnrichmentJob, error: Exception) -> None:
+    job.status = "failed"
+    job.finished_at = _utcnow()
+    job.last_error = str(error)
+
+
 @router.post(
     "/assets/import",
     response_model=AssetImportResponse,
@@ -615,7 +634,25 @@ def enqueue_asset_enrichment(
             "fetch_versions": payload.fetch_versions,
         },
     )
-    session.commit()
+    _mark_job_running(job)
+    session.flush()
+    service = LeadEnrichmentService(session)
+    try:
+        result = service.enrich_asset(
+            asset_id=asset_id,
+            requested_sources=[source.value for source in payload.requested_sources],
+            candidate_domains=payload.candidate_domains,
+            force_refresh=payload.force_refresh,
+            fetch_versions=payload.fetch_versions,
+        )
+        _mark_job_finished(job, {**job.payload, "result": result})
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        _mark_job_failed(job, exc)
+        session.commit()
+        raise HTTPException(status_code=500, detail=f"Enrichment failed: {exc}") from exc
+    finally:
+        service.close()
     return _serialize_job(job)
 
 
@@ -648,7 +685,23 @@ def enqueue_lead_resolution(
             "recompute_contact_routes": payload.recompute_contact_routes,
         },
     )
-    session.commit()
+    _mark_job_running(job)
+    session.flush()
+    service = LeadResolveScoreService(session)
+    try:
+        result = service.resolve_lead(
+            lead_record_id=lead_id,
+            resolver_version=payload.resolver_version,
+            scorer_version=payload.scorer_version,
+            recompute_org_candidates=payload.recompute_org_candidates,
+            recompute_contact_routes=payload.recompute_contact_routes,
+        )
+        _mark_job_finished(job, {**job.payload, "result": result})
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        _mark_job_failed(job, exc)
+        session.commit()
+        raise HTTPException(status_code=500, detail=f"Resolution failed: {exc}") from exc
     return _serialize_job(job)
 
 
@@ -678,7 +731,20 @@ def enqueue_lead_rescore(
             "reason": payload.reason,
         },
     )
-    session.commit()
+    _mark_job_running(job)
+    session.flush()
+    service = LeadResolveScoreService(session)
+    try:
+        result = service.rescore_lead(
+            lead_record_id=lead_id,
+            scorer_version=payload.scorer_version,
+        )
+        _mark_job_finished(job, {**job.payload, "result": result})
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        _mark_job_failed(job, exc)
+        session.commit()
+        raise HTTPException(status_code=500, detail=f"Rescore failed: {exc}") from exc
     return _serialize_job(job)
 
 

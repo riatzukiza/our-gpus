@@ -4,12 +4,14 @@ from app.db import (
     Asset,
     CampaignCluster,
     CampaignClusterMember,
+    ContactEndpoint,
     EnrichmentJob,
     EnrichmentRun,
     LeadRecord,
     RawFetch,
     SourceObservation,
 )
+from app.lead_services import LeadEnrichmentService
 
 
 def test_import_assets_creates_leads_and_provenance(client, session, admin_headers):
@@ -45,7 +47,69 @@ def test_import_assets_creates_leads_and_provenance(client, session, admin_heade
     assert observations[0].evidence_type == "asset_observation"
 
 
-def test_enrich_and_status_routes_queue_jobs_and_update_leads(client, session, admin_headers):
+def test_enrich_and_status_routes_queue_jobs_and_update_leads(
+    client, session, admin_headers, monkeypatch
+):
+    rdap_ip_payload = {
+        "objectClassName": "ip network",
+        "name": "Example Corp Network",
+        "entities": [
+            {
+                "roles": ["abuse"],
+                "vcardArray": [
+                    "vcard",
+                    [
+                        ["fn", {}, "text", "Example Corp"],
+                        ["email", {}, "text", "abuse@example.org"],
+                    ],
+                ],
+            }
+        ],
+    }
+    rdap_domain_payload = {
+        "objectClassName": "domain",
+        "ldhName": "example.org",
+        "entities": [
+            {
+                "roles": ["technical"],
+                "vcardArray": [
+                    "vcard",
+                    [
+                        ["fn", {}, "text", "Example Corp"],
+                        ["email", {}, "text", "tech@example.org"],
+                    ],
+                ],
+            }
+        ],
+    }
+
+    def fake_fetch_json(_service, url):
+        if url == "https://rdap.org/ip/198.51.100.5":
+            return 200, "rdap-ip", rdap_ip_payload
+        if url == "https://rdap.org/domain/example.org":
+            return 200, "rdap-domain", rdap_domain_payload
+        return 404, "not found", None
+
+    def fake_fetch_text(_service, url):
+        if url == "https://example.org/.well-known/security.txt":
+            return (
+                200,
+                "Contact: mailto:security@example.org\n"
+                "Policy: https://example.org/security\n"
+                "Expires: 2026-12-31T00:00:00Z\n",
+            )
+        if url == "https://api.example.org/.well-known/security.txt":
+            return 404, "missing"
+        if url.endswith("/contact"):
+            return 200, '<a href="mailto:hello@example.org">Contact</a>'
+        if url.endswith("/"):
+            return 200, "<html><body>Example Corp</body></html>"
+        return 404, "missing"
+
+    monkeypatch.setattr(LeadEnrichmentService, "_fetch_json", fake_fetch_json)
+    monkeypatch.setattr(LeadEnrichmentService, "_fetch_text", fake_fetch_text)
+    monkeypatch.setattr(LeadEnrichmentService, "_reverse_dns", lambda _service, _ip: "api.example.org")
+
     import_response = client.post(
         "/api/assets/import",
         headers=admin_headers,
@@ -61,13 +125,14 @@ def test_enrich_and_status_routes_queue_jobs_and_update_leads(client, session, a
         f"/api/enrich/{asset_id}",
         headers=admin_headers,
         json={
-            "requested_sources": ["rdap", "security_txt"],
+            "requested_sources": ["rdap", "ptr", "security_txt", "website"],
             "candidate_domains": ["example.org"],
             "fetch_versions": {"rdap": "v1"},
         },
     )
     assert enrich_response.status_code == 200
     assert enrich_response.json()["job_type"] == "enrich_asset"
+    assert enrich_response.json()["status"] == "completed"
 
     resolve_response = client.post(
         f"/api/resolve/{lead_id}",
@@ -76,6 +141,7 @@ def test_enrich_and_status_routes_queue_jobs_and_update_leads(client, session, a
     )
     assert resolve_response.status_code == 200
     assert resolve_response.json()["job_type"] == "resolve_lead"
+    assert resolve_response.json()["status"] == "completed"
 
     rescore_response = client.post(
         f"/api/re-score/{lead_id}",
@@ -84,6 +150,7 @@ def test_enrich_and_status_routes_queue_jobs_and_update_leads(client, session, a
     )
     assert rescore_response.status_code == 200
     assert rescore_response.json()["job_type"] == "rescore_lead"
+    assert rescore_response.json()["status"] == "completed"
 
     status_response = client.post(
         f"/api/lead-records/{lead_id}/status",
@@ -96,11 +163,27 @@ def test_enrich_and_status_routes_queue_jobs_and_update_leads(client, session, a
 
     enrichment_run = session.exec(select(EnrichmentRun).where(EnrichmentRun.asset_id == asset_id)).first()
     assert enrichment_run is not None
-    assert enrichment_run.rdap_status == "pending"
-    assert enrichment_run.security_txt_status == "pending"
+    assert enrichment_run.rdap_status == "ok"
+    assert enrichment_run.ptr_status == "ok"
+    assert enrichment_run.security_txt_status == "ok"
+    assert enrichment_run.contact_page_status == "ok"
 
     jobs = session.exec(select(EnrichmentJob).order_by(EnrichmentJob.job_type)).all()
     assert [job.job_type for job in jobs] == ["enrich_asset", "rescore_lead", "resolve_lead"]
+    assert all(job.status == "completed" for job in jobs)
+
+    contacts = session.exec(select(ContactEndpoint)).all()
+    assert len(contacts) >= 2
+
+    lead_detail = client.get(f"/api/lead-records/{lead_id}", headers=admin_headers)
+    assert lead_detail.status_code == 200
+    lead_payload = lead_detail.json()
+    assert lead_payload["recommended_route"] == "security_txt"
+    assert lead_payload["primary_contact"]["value"] == "mailto:security@example.org"
+    assert lead_payload["scores"]["route_legitimacy"] == 100
+    assert lead_payload["organization"] is not None
+    assert lead_payload["organization"]["org_candidates"]
+    assert any(step["kind"] == "security_txt_contact" for step in lead_payload["evidence_steps"])
 
 
 def test_list_leads_and_clusters(client, session, admin_headers):
