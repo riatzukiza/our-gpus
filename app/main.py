@@ -540,6 +540,63 @@ async def get_admin_session(_: None = Depends(require_admin_api_key)):
     return {"authorized": True}
 
 
+@app.post("/api/admin/enrich-leads")
+async def trigger_enrich_leads(
+    limit: int | None = Query(default=None, ge=1),
+    _: None = Depends(require_admin_api_key),
+):
+    from worker.tasks import enrich_leads
+
+    task = enrich_leads.delay(limit=limit)
+    return {
+        "message": "Queued lead enrichment task",
+        "task_id": task.id,
+        "limit": limit,
+    }
+
+
+@app.get("/api/admin/enrichment-stats")
+async def get_enrichment_stats(
+    _: None = Depends(require_admin_api_key),
+    session: Session = Depends(get_session),
+):
+    from app.db import Host
+
+    total_probed = session.exec(
+        select(func.count()).select_from(Host).where(Host.api_version != None)  # noqa: E711
+    ).one()
+    enriched = session.exec(
+        select(func.count()).select_from(Host).where(Host.enriched_at != None)  # noqa: E711
+    ).one()
+    with_email = session.exec(
+        select(func.count()).select_from(Host).where(Host.abuse_email != None)  # noqa: E711
+    ).one()
+    with_org = session.exec(
+        select(func.count()).select_from(Host).where(Host.org != None)  # noqa: E711
+    ).one()
+    with_cloud = session.exec(
+        select(func.count()).select_from(Host).where(Host.cloud_provider != None)  # noqa: E711
+    ).one()
+
+    # Cloud breakdown
+    cloud_rows = session.exec(
+        select(Host.cloud_provider, func.count(Host.id))
+        .where(Host.cloud_provider != None)  # noqa: E711
+        .group_by(Host.cloud_provider)
+        .order_by(func.count(Host.id).desc())
+    ).all()
+
+    return {
+        "total_probed": total_probed,
+        "enriched": enriched,
+        "pending": total_probed - enriched,
+        "with_email": with_email,
+        "with_org": with_org,
+        "with_cloud": with_cloud,
+        "cloud_breakdown": {row[0]: row[1] for row in cloud_rows},
+    }
+
+
 @app.get("/api/admin/jobs")
 async def get_admin_jobs(
     limit: int = Query(default=50, ge=1, le=200),
@@ -731,6 +788,9 @@ async def list_hosts(
     country: str | None = None,
     system: str | None = None,
     group_id: int | None = None,
+    enriched: bool | None = None,
+    cloud_provider: str | None = None,
+    has_email: bool | None = None,
     sort: str = "last_seen",
     session: Session = Depends(get_session),
 ):
@@ -744,6 +804,17 @@ async def list_hosts(
         system=system,
         group_id=group_id,
     )
+
+    # Enrichment filters
+    if enriched is not None:
+        if enriched:
+            base_query = base_query.where(Host.enriched_at != None)  # noqa: E711
+        else:
+            base_query = base_query.where(Host.enriched_at == None)  # noqa: E711
+    if cloud_provider:
+        base_query = base_query.where(Host.cloud_provider == cloud_provider)
+    if has_email:
+        base_query = base_query.where(Host.abuse_email != None)  # noqa: E711
 
     # Get total count
     count_query = select(func.count()).select_from(base_query.subquery())
@@ -792,6 +863,12 @@ async def list_hosts(
                 geo_city=h.geo_city,
                 groups=group_names,
                 models=model_names,
+                isp=h.isp,
+                org=h.org,
+                asn=h.asn,
+                cloud_provider=h.cloud_provider,
+                abuse_email=h.abuse_email,
+                enriched_at=h.enriched_at,
             )
         )
 
@@ -913,6 +990,12 @@ async def get_host(host_id: int, session: Session = Depends(get_session)):
         groups=group_names,
         models=models,
         last_probe=last_probe_data,
+        isp=host.isp,
+        org=host.org,
+        asn=host.asn,
+        cloud_provider=host.cloud_provider,
+        abuse_email=host.abuse_email,
+        enriched_at=host.enriched_at,
     )
 
 

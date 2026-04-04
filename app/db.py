@@ -32,6 +32,13 @@ class Host(SQLModel, table=True):
     geo_lon: float | None = None
     status: str = Field(default="unknown")  # online, offline, error, rate_limited
     last_error: str | None = None
+    # Enrichment fields
+    isp: str | None = None
+    org: str | None = None
+    asn: str | None = None
+    cloud_provider: str | None = None
+    abuse_email: str | None = None
+    enriched_at: datetime | None = None
 
     __table_args__ = (Index("idx_ip_port", "ip", "port"),)
 
@@ -362,9 +369,7 @@ class RawFetch(SQLModel, table=True):
     parser_version: str | None = None
     fetched_at: datetime | None = None
     last_verified_at: datetime | None = None
-    metadata_json: dict[str, Any] = Field(
-        default_factory=dict, sa_column=Column("metadata", JSON)
-    )
+    metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column("metadata", JSON))
 
 
 class ContactEndpoint(SQLModel, table=True):
@@ -383,9 +388,7 @@ class ContactEndpoint(SQLModel, table=True):
     first_seen: datetime = Field(default_factory=datetime.utcnow)
     last_seen: datetime = Field(default_factory=datetime.utcnow)
     last_verified_at: datetime | None = None
-    metadata_json: dict[str, Any] = Field(
-        default_factory=dict, sa_column=Column("metadata", JSON)
-    )
+    metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column("metadata", JSON))
 
 
 class SourceObservation(SQLModel, table=True):
@@ -405,9 +408,7 @@ class SourceObservation(SQLModel, table=True):
     last_seen_at: datetime = Field(default_factory=datetime.utcnow)
     weight: float = 0.0
     confidence: float = 0.0
-    metadata_json: dict[str, Any] = Field(
-        default_factory=dict, sa_column=Column("metadata", JSON)
-    )
+    metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column("metadata", JSON))
 
 
 class OrgCandidate(SQLModel, table=True):
@@ -484,7 +485,9 @@ class LeadContactCandidate(SQLModel, table=True):
     last_evaluated_at: datetime = Field(default_factory=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint("lead_record_id", "contact_id", "route", name="uq_lead_contact_candidates"),
+        UniqueConstraint(
+            "lead_record_id", "contact_id", "route", name="uq_lead_contact_candidates"
+        ),
         CheckConstraint("rank > 0", name="ck_lead_contact_candidates_rank_positive"),
     )
 
@@ -625,10 +628,29 @@ def init_db(database_url: str = None):
     if "sqlite" in db_url:
         _ensure_legacy_sqlite_columns(engine)
         _ensure_legacy_sqlite_tables(engine)
+        _ensure_enrichment_columns(engine)
 
     from sqlmodel import Session
 
     SessionLocal = Session
+
+
+def _ensure_enrichment_columns(engine) -> None:
+    """Add enrichment columns to hosts table if they don't exist."""
+    inspector = inspect(engine)
+    existing = {col["name"] for col in inspector.get_columns("hosts")}
+    enrichment_cols = [
+        ("isp", "TEXT"),
+        ("org", "TEXT"),
+        ("asn", "TEXT"),
+        ("cloud_provider", "TEXT"),
+        ("abuse_email", "TEXT"),
+        ("enriched_at", "DATETIME"),
+    ]
+    with engine.begin() as connection:
+        for name, ddl_type in enrichment_cols:
+            if name not in existing:
+                connection.execute(text(f"ALTER TABLE hosts ADD COLUMN {name} {ddl_type}"))
 
 
 def get_session():

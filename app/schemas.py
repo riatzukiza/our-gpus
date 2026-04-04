@@ -55,6 +55,13 @@ class HostResponse(BaseModel):
     groups: list[str] | None = None
     models: list[Any]
     last_probe: dict[str, Any] | None = None
+    # Enrichment fields
+    isp: str | None = None
+    org: str | None = None
+    asn: str | None = None
+    cloud_provider: str | None = None
+    abuse_email: str | None = None
+    enriched_at: datetime | None = None
 
 
 class HostGroupCreateRequest(BaseModel):

@@ -103,6 +103,18 @@ Note: the current implementation still exposes `tor` in some API payloads and UI
 
 ---
 
+### wireguard-connect — Planned Operator-Controlled VPN Discovery
+
+**Risk tier:** bounded
+
+**Mechanism:** Planned future strategy. Like `tor-connect`, this performs bounded active HTTP/TCP discovery, but routes through an operator-controlled WireGuard tunnel instead of Tor exits.
+
+**Status:** spec only, not deployed.
+
+**Reference:** `specs/wireguard-connect-strategy.md`
+
+---
+
 ### masscan — Unrestricted Port Discovery
 
 **Risk tier:** unrestricted
@@ -139,10 +151,10 @@ Note: the current implementation still exposes `tor` in some API payloads and UI
 ```
 passive        < bounded        < unrestricted
 
-shodan         < tor-connect    < masscan
-zero packets   < TCP connects   < raw SYN scan
-Shodan cost    < Tor egress     < direct egress
-no complaints  < indirect       < direct complaints
+shodan         < tor-connect / wireguard-connect < masscan
+zero packets   < TCP connects                  < raw SYN scan
+Shodan cost    < indirect controlled egress    < direct egress
+no complaints  < bounded active                < direct complaints
 ```
 
 ## Strategy Selection Rules

@@ -155,6 +155,66 @@ def test_tor_strategy_requires_exclude_file(tmp_path: Path):
         strategy.execute(context)
 
 
+@pytest.mark.asyncio
+async def test_tor_probe_scan_uses_fresh_client_per_host(tmp_path: Path, monkeypatch):
+    strategy = TorScanStrategy()
+    context = ScanContext(
+        scan_id=1,
+        scan_uuid="scan0001",
+        request=ScanRequest(
+            target="1.1.1.0/30",
+            port="11434",
+            rate=1000,
+            router_mac="00:00:00:00:00:00",
+            strategy=TOR_CONNECT_STRATEGY,
+            tor_concurrency=2,
+        ),
+        paths=ScanPaths(
+            output_file=str(tmp_path / "scan.txt"),
+            log_file=str(tmp_path / "scan.log"),
+        ),
+        exclude_file=str(tmp_path / "excludes.conf"),
+    )
+
+    created_clients: list[dict] = []
+    seen_headers: list[dict[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code: int):
+            self.status_code = status_code
+
+    class FakeAsyncClient:
+        def __init__(self, *_args, **kwargs):
+            created_clients.append(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):  # noqa: ANN001, ARG002
+            return False
+
+        async def get(self, url, headers=None):  # noqa: ANN001, ARG002
+            seen_headers.append(headers or {})
+            return FakeResponse(200)
+
+    monkeypatch.setattr("app.masscan.httpx.AsyncClient", FakeAsyncClient)
+
+    found = await strategy._run_probe_scan(
+        context,
+        ["1.1.1.1", "1.1.1.2"],
+        previously_sampled_hosts=0,
+        new_hosts=2,
+        revisited_hosts=0,
+    )
+
+    assert found == ["1.1.1.1", "1.1.1.2"]
+    assert len(created_clients) == 2
+    assert all(headers.get("Connection") == "close" for headers in seen_headers)
+    log_text = Path(context.paths.log_file).read_text()
+    assert "proxy_client_mode=fresh-per-host" in log_text
+    assert "status_200=2" in log_text
+
+
 def test_scan_service_canonicalizes_legacy_tor_strategy(tmp_path: Path, session, monkeypatch):
     exclude_file = tmp_path / "excludes.conf"
     exclude_file.write_text("192.0.2.0/24\n")
