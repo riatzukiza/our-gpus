@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from celery import current_task
 import httpx
@@ -771,3 +771,167 @@ def queue_ungeocoded_hosts(
         "task_ids": task_ids,
         "include_discovered": include_discovered,
     }
+
+
+@celery_app.task(bind=True, name="worker.tasks.enrich_leads")
+def enrich_leads(self, limit: int | None = None):  # noqa: ARG001
+    """Enrich probed Ollama hosts with RDAP, ISP, and cloud provider data."""
+    import asyncio
+    import json
+
+    import httpx
+
+    import app.db as db_module
+
+    db_module.init_db()
+
+    task_id = self.request.id
+    label = f"Enrich leads (limit={limit or 'all'})"
+
+    def _classify_cloud(as_str: str, isp: str, org: str) -> str:
+        s = f"{as_str} {isp} {org}".lower()
+        if "amazon" in s or "aws" in s:
+            return "AWS"
+        if "microsoft" in s or "azure" in s:
+            return "Azure"
+        if "google" in s or "gcp" in s:
+            return "GCP"
+        if "hetzner" in s:
+            return "Hetzner"
+        if "ovh" in s:
+            return "OVH"
+        if "digitalocean" in s:
+            return "DigitalOcean"
+        if "vultr" in s:
+            return "Vultr"
+        if "linode" in s or "akamai" in s:
+            return "Linode/Akamai"
+        if "oracle" in s:
+            return "Oracle"
+        if "alibaba" in s:
+            return "Alibaba"
+        if "tencent" in s:
+            return "Tencent"
+        if "contabo" in s:
+            return "Contabo"
+        return "unknown"
+
+    async def _resolve_rdap(client: httpx.AsyncClient, ip: str) -> dict:
+        try:
+            resp = await client.get(
+                f"https://rdap.arin.net/registry/ip/{ip}",
+                timeout=8,
+                follow_redirects=True,
+            )
+            if resp.status_code == 200:
+                rdap = resp.json()
+                org_name = None
+                abuse_email = None
+                for entity in rdap.get("entities", []):
+                    vcard = entity.get("vcardArray", [])
+                    roles = entity.get("roles", [])
+                    if len(vcard) > 1:
+                        for prop in vcard[1]:
+                            if prop[0] == "fn" and not org_name:
+                                org_name = prop[3]
+                            if prop[0] == "email" and "abuse" in roles:
+                                abuse_email = prop[3]
+                return {"org": org_name, "abuse_email": abuse_email}
+        except Exception:
+            pass
+        return {"org": None, "abuse_email": None}
+
+    async def _resolve_ipinfo(client: httpx.AsyncClient, ip: str) -> dict:
+        try:
+            resp = await client.get(
+                f"http://ip-api.com/json/{ip}?fields=status,isp,org,as",
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "success":
+                    return {
+                        "isp": data.get("isp"),
+                        "org_name": data.get("org"),
+                        "asn": data.get("as"),
+                    }
+        except Exception:
+            pass
+        return {}
+
+    async def _enrich_all(hosts: list) -> list:
+        async with httpx.AsyncClient() as client:
+            rdap_tasks = [_resolve_rdap(client, h.ip) for h in hosts]
+            ipinfo_tasks = [_resolve_ipinfo(client, h.ip) for h in hosts]
+            rdap_results = await asyncio.gather(*rdap_tasks)
+            ipinfo_results = await asyncio.gather(*ipinfo_tasks)
+
+        results = []
+        for host, rdap, ipinfo in zip(hosts, rdap_results, ipinfo_results):
+            cloud = _classify_cloud(
+                ipinfo.get("asn") or "",
+                ipinfo.get("isp") or "",
+                ipinfo.get("org_name") or "",
+            )
+            results.append(
+                {
+                    "host_id": host.id,
+                    "ip": host.ip,
+                    "port": host.port,
+                    "country": host.geo_country,
+                    "org": rdap.get("org") or ipinfo.get("org_name"),
+                    "abuse_email": rdap.get("abuse_email"),
+                    "isp": ipinfo.get("isp"),
+                    "asn": ipinfo.get("asn"),
+                    "cloud": cloud,
+                    "ollama_version": host.api_version,
+                    "gpu": host.gpu,
+                    "gpu_vram_mb": host.gpu_vram_mb,
+                }
+            )
+        return results
+
+    with Session(db_module.engine) as session:
+        # Get probed hosts that haven't been enriched yet
+        query = (
+            select(db_module.Host)
+            .where(db_module.Host.api_version != None)  # noqa: E711
+            .where(db_module.Host.enriched_at == None)  # noqa: E711
+            .order_by(db_module.Host.id)
+        )
+        if limit:
+            query = query.limit(limit)
+        hosts = list(session.exec(query).all())
+
+        _mark_task_started(task_id, kind="enrich_leads", label=label, total_items=len(hosts))
+
+        results = asyncio.run(_enrich_all(hosts))
+
+        # Write enrichment data directly to Host records
+        success = 0
+        for r in results:
+            host = session.get(db_module.Host, r["host_id"])
+            if host:
+                host.isp = r.get("isp")
+                host.org = r.get("org")
+                host.asn = r.get("asn")
+                host.cloud_provider = r.get("cloud")
+                host.abuse_email = r.get("abuse_email")
+                host.enriched_at = datetime.now(timezone.utc)
+                success += 1
+
+        session.commit()
+
+        _mark_task_finished(
+            task_id,
+            kind="enrich_leads",
+            label=label,
+            status="success",
+            total_items=len(hosts),
+            processed_items=len(results),
+            success_items=success,
+            failed_items=len(hosts) - success,
+            message=f"Enriched {success} hosts ({sum(1 for r in results if r['abuse_email'])} with email)",
+        )
+
+    return {"enriched": success, "total": len(hosts)}

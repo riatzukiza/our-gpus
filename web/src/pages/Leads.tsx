@@ -259,6 +259,215 @@ function SectionCard({
   );
 }
 
+function EnrichedHostsTable({ apiKey }: { apiKey: string | null }) {
+  const [page, setPage] = useState(1);
+  const [cloudFilter, setCloudFilter] = useState<string>("");
+  const [hasEmailOnly, setHasEmailOnly] = useState(false);
+
+  const { data, isLoading, refetch } = useQuery(
+    ["enriched-hosts", page, cloudFilter, hasEmailOnly],
+    async () => {
+      const params = new URLSearchParams({
+        page: String(page),
+        size: "50",
+        sort: "last_seen",
+        enriched: "true",
+      });
+      if (cloudFilter) params.set("cloud_provider", cloudFilter);
+      if (hasEmailOnly) params.set("has_email", "true");
+      const response = await axios.get(`/api/hosts?${params.toString()}`, {
+        headers: apiKey ? { "X-API-Key": apiKey } : {},
+      });
+      return response.data;
+    },
+    { enabled: Boolean(apiKey), refetchOnWindowFocus: false }
+  );
+
+  const { data: stats } = useQuery(
+    ["enrichment-stats"],
+    async () => {
+      const response = await axios.get("/api/admin/enrichment-stats", {
+        headers: apiKey ? { "X-API-Key": apiKey } : {},
+      });
+      return response.data;
+    },
+    { enabled: Boolean(apiKey), refetchOnWindowFocus: false }
+  );
+
+  const triggerEnrich = async () => {
+    await axios.post("/api/admin/enrich-leads", null, {
+      headers: apiKey ? { "X-API-Key": apiKey } : {},
+    });
+    setTimeout(() => refetch(), 5000);
+  };
+
+  return (
+    <div className="mb-8 rounded-2xl border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-800">
+      <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4 dark:border-gray-700">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-white">
+            Enriched Leads
+          </h2>
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+            {stats ? (
+              <>
+                {stats.enriched} enriched / {stats.total_probed} probed / {stats.with_email} with email
+              </>
+            ) : (
+              "Loading stats..."
+            )}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <select
+            value={cloudFilter}
+            onChange={(e) => { setCloudFilter(e.target.value); setPage(1); }}
+            className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-700 dark:text-white"
+          >
+            <option value="">All clouds</option>
+            {stats?.cloud_breakdown &&
+              Object.entries(stats.cloud_breakdown as Record<string, number>).map(([cloud, count]) => (
+                <option key={cloud} value={cloud}>
+                  {cloud} ({count})
+                </option>
+              ))}
+          </select>
+          <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300">
+            <input
+              type="checkbox"
+              checked={hasEmailOnly}
+              onChange={(e) => { setHasEmailOnly(e.target.checked); setPage(1); }}
+              className="rounded"
+            />
+            Has email
+          </label>
+          <button
+            type="button"
+            onClick={triggerEnrich}
+            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-blue-700"
+          >
+            <Sparkles className="h-4 w-4" />
+            Enrich All
+          </button>
+        </div>
+      </div>
+
+      <div className="overflow-x-auto">
+        {isLoading ? (
+          <div className="flex items-center justify-center px-5 py-12 text-gray-500">
+            <Loader className="mr-2 h-5 w-5 animate-spin" />
+            Loading enriched hosts...
+          </div>
+        ) : data?.items?.length ? (
+          <table className="w-full text-left text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 text-xs uppercase tracking-wider text-gray-500 dark:border-gray-700">
+                <th className="px-5 py-3">IP</th>
+                <th className="px-5 py-3">Country</th>
+                <th className="px-5 py-3">Organization</th>
+                <th className="px-5 py-3">Cloud</th>
+                <th className="px-5 py-3">ISP</th>
+                <th className="px-5 py-3">Ollama</th>
+                <th className="px-5 py-3">GPU</th>
+                <th className="px-5 py-3">Email</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+              {data.items.map((host: any) => (
+                <tr key={host.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                  <td className="px-5 py-3 font-mono text-gray-900 dark:text-white">
+                    <a
+                      href={`http://${host.ip}:${host.port}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-600 hover:underline dark:text-blue-400"
+                    >
+                      {host.ip}:{host.port}
+                    </a>
+                  </td>
+                  <td className="px-5 py-3 text-gray-600 dark:text-gray-300">
+                    {host.geo_country || "—"}
+                  </td>
+                  <td className="px-5 py-3 text-gray-600 dark:text-gray-300">
+                    {host.org || "—"}
+                  </td>
+                  <td className="px-5 py-3">
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                      host.cloud_provider === "unknown"
+                        ? "bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300"
+                        : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300"
+                    }`}>
+                      {host.cloud_provider || "—"}
+                    </span>
+                  </td>
+                  <td className="max-w-[200px] truncate px-5 py-3 text-gray-500 dark:text-gray-400">
+                    {host.isp || "—"}
+                  </td>
+                  <td className="px-5 py-3 font-mono text-xs text-gray-600 dark:text-gray-300">
+                    {host.api_version || "—"}
+                  </td>
+                  <td className="px-5 py-3 text-gray-600 dark:text-gray-300">
+                    {host.gpu ? (
+                      <span className="text-green-600 dark:text-green-400">
+                        {host.gpu_vram_mb ? `${(host.gpu_vram_mb / 1024).toFixed(0)}GB` : "✓"}
+                      </span>
+                    ) : (
+                      <span className="text-gray-400">—</span>
+                    )}
+                  </td>
+                  <td className="px-5 py-3">
+                    {host.abuse_email ? (
+                      <a
+                        href={`mailto:${host.abuse_email}`}
+                        className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400"
+                      >
+                        <Mail className="h-3.5 w-3.5" />
+                        {host.abuse_email}
+                      </a>
+                    ) : (
+                      <span className="text-gray-400">—</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <div className="px-5 py-12 text-center text-gray-500">
+            No enriched hosts yet. Click "Enrich All" to start.
+          </div>
+        )}
+      </div>
+
+      {data && data.total > data.size && (
+        <div className="flex items-center justify-between border-t border-gray-200 px-5 py-3 dark:border-gray-700">
+          <span className="text-sm text-gray-500">
+            Page {data.page} of {Math.ceil(data.total / data.size)} ({data.total} hosts)
+          </span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => p - 1)}
+              className="rounded-lg border border-gray-300 px-3 py-1 text-sm disabled:opacity-50 dark:border-gray-600"
+            >
+              Prev
+            </button>
+            <button
+              type="button"
+              disabled={page >= Math.ceil(data.total / data.size)}
+              onClick={() => setPage((p) => p + 1)}
+              className="rounded-lg border border-gray-300 px-3 py-1 text-sm disabled:opacity-50 dark:border-gray-600"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Leads() {
   const [message, setMessage] = useState<{
     type: "success" | "error";
@@ -708,6 +917,8 @@ export default function Leads() {
           icon={Briefcase}
         />
       </div>
+
+      <EnrichedHostsTable apiKey={adminKey} />
 
       <div className="grid gap-6 xl:grid-cols-[360px,minmax(0,1fr),340px]">
         <div className="space-y-6">

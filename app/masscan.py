@@ -11,6 +11,7 @@ import subprocess
 import threading
 import uuid
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -528,13 +529,15 @@ class TorScanStrategy(ScanStrategy):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        timeout_seconds = int(os.environ.get("PROBE_TIMEOUT_SECS", "5"))
-        retries = int(os.environ.get("PROBE_RETRIES", "2"))
+        timeout_seconds = int(
+            os.environ.get("PROBE_TIMEOUT_SECS", str(settings.probe_timeout_secs))
+        )
+        retries = int(os.environ.get("PROBE_RETRIES", str(settings.probe_retries)))
         concurrency = min(
             context.request.tor_concurrency
             or settings.tor_scan_concurrency
             or int(os.environ.get("TOR_SCAN_CONCURRENCY", DEFAULT_TOR_SCAN_CONCURRENCY)),
-            int(os.environ.get("PROBE_CONCURRENCY", "200")),
+            int(os.environ.get("PROBE_CONCURRENCY", str(settings.probe_concurrency))),
             len(allowed_hosts),
         )
         concurrency = max(concurrency, 1)
@@ -551,6 +554,9 @@ class TorScanStrategy(ScanStrategy):
                     f"previously_sampled_hosts={previously_sampled_hosts}",
                     f"new_hosts={new_hosts}",
                     f"revisited_hosts={revisited_hosts}",
+                    f"probe_timeout_s={timeout_seconds}",
+                    f"probe_retries={retries}",
+                    "proxy_client_mode=fresh-per-host",
                 ]
             )
             + "\n"
@@ -558,31 +564,36 @@ class TorScanStrategy(ScanStrategy):
 
         semaphore = asyncio.Semaphore(concurrency)
         found_host_ips: list[str] = []
+        response_status_counts: Counter[int] = Counter()
+        transport_error_counts: Counter[str] = Counter()
 
-        async with httpx.AsyncClient(
-            verify=False,
-            trust_env=True,
-            timeout=httpx.Timeout(timeout_seconds, connect=timeout_seconds),
-            limits=httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency),
-        ) as client:
+        async def probe(ip: str) -> None:
+            url = f"http://{ip}:{context.request.port}/api/tags"
+            headers = {"Accept": "application/json", "Connection": "close"}
+            async with semaphore:
+                for attempt in range(retries):
+                    try:
+                        async with httpx.AsyncClient(
+                            verify=False,
+                            trust_env=True,
+                            timeout=httpx.Timeout(timeout_seconds, connect=timeout_seconds),
+                            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+                            follow_redirects=True,
+                        ) as client:
+                            response = await client.get(url, headers=headers)
+                        response_status_counts[response.status_code] += 1
+                        if response.status_code == 200:
+                            found_host_ips.append(ip)
+                            return
+                        if 400 <= response.status_code < 500 and response.status_code != 503:
+                            return
+                    except httpx.HTTPError as error:
+                        transport_error_counts[type(error).__name__] += 1
+                        if attempt == retries - 1:
+                            return
+                    await asyncio.sleep(min(1 * (2**attempt), 4))
 
-            async def probe(ip: str) -> None:
-                url = f"http://{ip}:{context.request.port}/api/tags"
-                async with semaphore:
-                    for attempt in range(retries):
-                        try:
-                            response = await client.get(url, headers={"Accept": "application/json"})
-                            if response.status_code == 200:
-                                found_host_ips.append(ip)
-                                return
-                            if 400 <= response.status_code < 500:
-                                return
-                        except httpx.HTTPError:
-                            if attempt == retries - 1:
-                                return
-                        await asyncio.sleep(min(1 * (2**attempt), 4))
-
-            await asyncio.gather(*(probe(ip) for ip in allowed_hosts))
+        await asyncio.gather(*(probe(ip) for ip in allowed_hosts))
 
         output_path.write_text(
             "\n".join(f"{ip}:{context.request.port}" for ip in found_host_ips)
@@ -590,6 +601,10 @@ class TorScanStrategy(ScanStrategy):
         )
         with log_path.open("a") as log_handle:
             log_handle.write(f"discovered_hosts={len(found_host_ips)}\n")
+            for status_code, count in sorted(response_status_counts.items()):
+                log_handle.write(f"status_{status_code}={count}\n")
+            for error_name, count in sorted(transport_error_counts.items()):
+                log_handle.write(f"error_{error_name}={count}\n")
         return found_host_ips
 
 
