@@ -1,14 +1,6 @@
-import { Link, useLocation } from "react-router-dom";
-import {
-  Upload,
-  Search,
-  Activity,
-  Moon,
-  Sun,
-  Settings,
-  Briefcase,
-} from "lucide-react";
-import { useDarkMode } from "../contexts/DarkModeContext";
+import { Link } from 'react-router-dom'
+import { Upload, Search, Activity, Moon, Sun, Settings } from 'lucide-react'
+import { useDarkMode } from '../contexts/DarkModeContext'
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -24,11 +16,8 @@ export default function Layout({ children }: LayoutProps) {
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-      <nav
-        aria-label="Main"
-        className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700"
-      >
-        <div className={`${shellWidth} mx-auto px-4 sm:px-6 lg:px-8`}>
+      <nav aria-label="Main" className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between h-16">
             <div className="flex">
               <div className="flex-shrink-0 flex items-center">
@@ -63,13 +52,6 @@ export default function Layout({ children }: LayoutProps) {
                   <Settings className="w-4 h-4 mr-2" />
                   Admin
                 </Link>
-                <Link
-                  to="/leads"
-                  className="inline-flex items-center px-1 pt-1 text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300"
-                >
-                  <Briefcase className="w-4 h-4 mr-2" />
-                  Leads
-                </Link>
               </div>
             </div>
             <div className="flex items-center space-x-4">
@@ -93,12 +75,9 @@ export default function Layout({ children }: LayoutProps) {
           </div>
         </div>
       </nav>
-      <main
-        id="main-content"
-        className={`${shellWidth} mx-auto py-6 sm:px-6 lg:px-8`}
-      >
+      <main id="main-content" className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
         {children}
       </main>
     </div>
-  );
+  )
 }

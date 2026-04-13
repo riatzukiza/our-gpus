@@ -1,238 +1,247 @@
-import { useState } from "react";
-import { useQuery } from "react-query";
-import axios from "axios";
+import { useState } from 'react'
+import { useQuery } from 'react-query'
+import axios from 'axios'
+import { format, formatDistanceToNowStrict } from 'date-fns'
 import {
   Activity,
   AlertCircle,
   CheckCircle,
+  Clock3,
   Database,
   Globe,
   Loader,
+  Play,
   Radar,
   RefreshCw,
-} from "lucide-react";
+  Square,
+  Terminal,
+} from 'lucide-react'
+import ScannerWorldMap from '../components/ScannerWorldMap'
+import type { CountryCount } from '../lib/countryLookup'
 
-import ScannerWorldMap from "../components/ScannerWorldMap";
-import ScannerWorkbench from "../components/ScannerWorkbench";
-import AdminUnlockPanel from "../components/admin/AdminUnlockPanel";
-import HostGroupsPanel from "../components/admin/HostGroupsPanel";
-import OverviewGrid from "../components/admin/OverviewGrid";
-import CurrentWorkflowCard from "../components/admin/CurrentWorkflowCard";
-import LiveLogsCard from "../components/admin/LiveLogsCard";
-import ProbeSnapshotCard from "../components/admin/ProbeSnapshotCard";
-import JobsPanel from "../components/admin/JobsPanel";
-import WorkflowHistoryPanel from "../components/admin/WorkflowHistoryPanel";
-import WorkflowRail from "../components/admin/WorkflowRail";
-import EvidenceLedger from "../components/admin/EvidenceLedger";
-import ExclusionsPanel from "../components/admin/ExclusionsPanel";
-import type {
-  AdminJobsResponse,
-  DashboardResponse,
-  CurrentLogsResponse,
-  ProbeStatsResponse,
-  WorkflowResponse,
-  WorkflowDetailResponse,
-} from "../components/admin/types";
-import { numberFormatter } from "../components/admin/format";
+type DashboardStatus = 'running' | 'stopping' | 'stopped' | 'not_running'
 
-import {
-  clearStoredAdminApiKey,
-  getStoredAdminApiKey,
-  setStoredAdminApiKey,
-} from "../lib/adminAuth";
+interface SchedulerStats {
+  total_blocks: number
+  scanned_blocks: number
+  unscanned_blocks: number
+  total_yield: number
+  avg_pheromone: number
+}
+
+interface CurrentJob {
+  cidr: string
+  scan_uuid: string
+  started_at: string
+  output_file: string
+  log_file: string
+  port: string
+  rate: number
+  estimated_duration_s: number
+}
+
+interface RecentResult {
+  cidr: string
+  scan_uuid: string
+  started_at: string
+  completed_at: string
+  output_file: string
+  log_file: string
+  hosts_found: number
+  duration_ms: number
+  success: boolean
+  error: string | null
+}
+
+interface TopBlock {
+  cidr: string
+  pheromone: number
+  scan_count: number
+  cumulative_yield: number
+  last_scan: string | null
+}
+
+interface SchedulerSnapshot {
+  status: DashboardStatus
+  started_at: string | null
+  uptime_seconds: number | null
+  prefix_len: number | null
+  estimated_block_duration_s: number | null
+  config: {
+    port: string
+    rate: number
+    max_block_duration_s: number
+    min_scan_interval_s: number
+  } | null
+  stats: SchedulerStats
+  current_job: CurrentJob | null
+  recent_results: RecentResult[]
+  top_blocks: TopBlock[]
+  last_error: string | null
+}
+
+interface HistoryEntry {
+  scan_id: number
+  cidr: string | null
+  status: string
+  started_at: string | null
+  completed_at: string | null
+  hosts_found: number
+  failed_rows: number
+  processed_rows: number
+  error_message: string | null
+}
+
+interface GeographySummary {
+  known_hosts: number
+  unknown_hosts: number
+  countries: CountryCount[]
+}
+
+interface DashboardResponse {
+  status: DashboardStatus
+  scheduler: SchedulerSnapshot
+  history: HistoryEntry[]
+  geography: GeographySummary
+}
+
+interface CurrentLogsResponse {
+  status: 'running' | 'idle' | 'not_running'
+  scan?: {
+    cidr: string
+    scan_uuid: string
+    started_at: string
+    port: string
+    rate: number
+    estimated_duration_s: number
+  }
+  log_file?: string
+  lines?: number
+  logs?: string
+  message?: string
+  last_error?: string | null
+}
+
+const numberFormatter = new Intl.NumberFormat()
+
+const statusClasses: Record<DashboardStatus, string> = {
+  running: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200',
+  stopping: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-200',
+  stopped: 'bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-200',
+  not_running: 'bg-slate-200 text-slate-800 dark:bg-slate-700 dark:text-slate-200',
+}
+
+const resultClasses = (success: boolean) =>
+  success
+    ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200'
+    : 'bg-rose-100 text-rose-800 dark:bg-rose-900/30 dark:text-rose-200'
+
+const formatTimestamp = (value: string | null) =>
+  value ? format(new Date(value), 'MMM d, yyyy HH:mm:ss') : 'Never'
+
+const formatAge = (value: string | null) =>
+  value ? formatDistanceToNowStrict(new Date(value), { addSuffix: true }) : 'Never'
+
+const formatDurationMs = (value: number) =>
+  value >= 60_000 ? `${(value / 60_000).toFixed(1)}m` : `${Math.max(1, Math.round(value / 1000))}s`
+
+const formatSeconds = (value: number | null) => {
+  if (value == null) {
+    return 'n/a'
+  }
+
+  if (value >= 3600) {
+    return `${(value / 3600).toFixed(1)}h`
+  }
+
+  if (value >= 60) {
+    return `${(value / 60).toFixed(1)}m`
+  }
+
+  return `${Math.round(value)}s`
+}
 
 const getErrorMessage = (error: unknown) => {
   if (axios.isAxiosError(error)) {
-    return (
-      error.response?.data?.detail ||
-      error.response?.data?.message ||
-      error.message
-    );
+    return error.response?.data?.detail || error.response?.data?.message || error.message
   }
 
-  return error instanceof Error ? error.message : "Unknown error";
-};
+  return error instanceof Error ? error.message : 'Unknown error'
+}
 
 export default function Admin() {
-  const [message, setMessage] = useState<{
-    type: "success" | "error";
-    text: string;
-  } | null>(null);
-  const [showLogs, setShowLogs] = useState(false);
-  const [apiKeyDraft, setApiKeyDraft] = useState(() => getStoredAdminApiKey());
-  const [adminKey, setAdminKey] = useState(() => getStoredAdminApiKey());
-  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(
-    null,
-  );
-
-  const {
-    data: sessionData,
-    isLoading: sessionLoading,
-    isError: sessionError,
-    error: sessionErrorValue,
-    refetch: refetchSession,
-  } = useQuery(
-    ["admin-session", adminKey],
-    async () => {
-      const response = await axios.get("/api/admin/session");
-      return response.data as { authorized: boolean };
-    },
-    {
-      enabled: Boolean(adminKey),
-      retry: false,
-      refetchOnWindowFocus: false,
-    },
-  );
-
-  const isAuthorized =
-    Boolean(adminKey) && !sessionError && sessionData?.authorized === true;
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [activeAction, setActiveAction] = useState<'start' | 'stop' | null>(null)
+  const [showLogs, setShowLogs] = useState(false)
 
   const { data, isLoading, isFetching, refetch } = useQuery(
-    ["aco-dashboard"],
+    ['aco-dashboard'],
     async () => {
-      const response = await axios.get("/api/aco/dashboard");
-      return response.data as DashboardResponse;
+      const response = await axios.get('/api/aco/dashboard')
+      return response.data as DashboardResponse
     },
     {
-      enabled: isAuthorized,
       refetchInterval: 5000,
       refetchIntervalInBackground: true,
-    },
-  );
+    }
+  )
 
-  const {
-    data: jobsData,
-    isFetching: jobsFetching,
-    refetch: refetchJobs,
-  } = useQuery(
-    ["admin-jobs"],
+  const { data: logData, isFetching: logsFetching, refetch: refetchLogs } = useQuery(
+    ['aco-current-logs'],
     async () => {
-      const response = await axios.get("/api/admin/jobs?limit=80");
-      return response.data as AdminJobsResponse;
+      const response = await axios.get('/api/aco/logs/current?lines=300')
+      return response.data as CurrentLogsResponse
     },
     {
-      enabled: isAuthorized,
-      refetchInterval: 3000,
-      refetchIntervalInBackground: true,
-    },
-  );
-
-  const {
-    data: probeStats,
-    isFetching: probeStatsFetching,
-    refetch: refetchProbeStats,
-  } = useQuery(
-    ["probe-stats"],
-    async () => {
-      const response = await axios.get("/api/probe-stats?minutes=5");
-      return response.data as ProbeStatsResponse;
-    },
-    {
-      enabled: isAuthorized,
-      refetchInterval: 5000,
-      refetchIntervalInBackground: true,
-    },
-  );
-
-  const {
-    data: logData,
-    isFetching: logsFetching,
-    refetch: refetchLogs,
-  } = useQuery(
-    ["aco-current-logs"],
-    async () => {
-      const response = await axios.get("/api/aco/logs/current?lines=300");
-      return response.data as CurrentLogsResponse;
-    },
-    {
-      enabled: isAuthorized && showLogs,
       refetchInterval: showLogs ? 2000 : false,
       refetchIntervalInBackground: showLogs,
-    },
-  );
-
-  const { data: workflowsData } = useQuery(
-    ["admin-workflows"],
-    async () => {
-      const response = await axios.get("/api/admin/workflows?limit=50");
-      return response.data as WorkflowResponse[];
-    },
-    {
-      enabled: isAuthorized,
-      refetchInterval: 5000,
-      refetchIntervalInBackground: true,
-    },
-  );
-
-  const { data: selectedWorkflow } = useQuery(
-    ["admin-workflow", selectedWorkflowId],
-    async () => {
-      if (!selectedWorkflowId) return null;
-      const response = await axios.get(
-        `/api/admin/workflows/${selectedWorkflowId}`,
-      );
-      return response.data as WorkflowDetailResponse;
-    },
-    {
-      enabled: isAuthorized && Boolean(selectedWorkflowId),
-    },
-  );
-
-  const scheduler = data?.scheduler;
-  const geography = data?.geography;
-  const history = data?.history || [];
-  const status = scheduler?.status || "not_running";
-  const currentJob = scheduler?.current_job;
-  const recentResults = scheduler?.recent_results || [];
-  const topBlocks = scheduler?.top_blocks || [];
-  const celeryJobs = jobsData?.jobs || [];
-  const discoveredHosts =
-    probeStats?.total_hosts ??
-    ((geography?.known_hosts ?? 0) + (geography?.unknown_hosts ?? 0));
-
-  const handleUnlock = async () => {
-    const nextKey = apiKeyDraft.trim();
-    if (!nextKey) {
-      setMessage({
-        type: "error",
-        text: "Enter an admin API key to unlock the control room.",
-      });
-      return;
+      enabled: showLogs,
     }
+  )
 
-    setStoredAdminApiKey(nextKey);
-    setAdminKey(nextKey);
-    setMessage(null);
-    const result = await refetchSession();
-    if (result.error) {
+  const scheduler = data?.scheduler
+  const geography = data?.geography
+  const history = data?.history || []
+  const status = scheduler?.status || 'not_running'
+  const currentJob = scheduler?.current_job
+  const recentResults = scheduler?.recent_results || []
+  const topBlocks = scheduler?.top_blocks || []
+
+  const handleSchedulerAction = async (action: 'start' | 'stop') => {
+    setActiveAction(action)
+    setMessage(null)
+
+    try {
+      const response = await axios.post(`/api/aco/scan/${action}`)
+      const nextStatus = response.data.status as string
+
+      if (action === 'start') {
+        setMessage({
+          type: 'success',
+          text:
+            nextStatus === 'already_running'
+              ? 'ACO scheduler is already active.'
+              : 'ACO scheduler started successfully.',
+        })
+      } else {
+        setMessage({
+          type: 'success',
+          text:
+            nextStatus === 'stop_requested'
+              ? 'Stop requested. The current block will finish before the scheduler goes idle.'
+              : 'ACO scheduler stopped.',
+        })
+      }
+
+      await refetch()
+    } catch (error) {
       setMessage({
-        type: "error",
-        text: `Unlock failed: ${getErrorMessage(result.error)}`,
-      });
+        type: 'error',
+        text: `${action === 'start' ? 'Start' : 'Stop'} failed: ${getErrorMessage(error)}`,
+      })
+    } finally {
+      setActiveAction(null)
     }
-  };
-
-  const handleLock = () => {
-    clearStoredAdminApiKey();
-    setAdminKey("");
-    setApiKeyDraft("");
-    setMessage(null);
-  };
-
-  if (!adminKey || sessionLoading || (!isAuthorized && sessionError)) {
-    return (
-      <AdminUnlockPanel
-        apiKeyDraft={apiKeyDraft}
-        isAuthorized={isAuthorized}
-        sessionError={sessionError}
-        message={message}
-        sessionErrorText={
-          sessionError ? getErrorMessage(sessionErrorValue) : null
-        }
-        onDraftChange={setApiKeyDraft}
-        onUnlock={handleUnlock}
-      />
-    );
   }
 
   if (isLoading || !scheduler || !geography) {
@@ -240,242 +249,467 @@ export default function Admin() {
       <div className="flex justify-center py-16">
         <Loader className="h-10 w-10 animate-spin text-blue-600" />
       </div>
-    );
+    )
   }
 
   const overviewCards = [
     {
-      label: "Scheduler Status",
-      value: status.replace("_", " "),
-      detail: currentJob ? currentJob.cidr : "No block currently scanning",
+      label: 'Scheduler Status',
+      value: status.replace('_', ' '),
+      detail: currentJob ? currentJob.cidr : 'No block currently scanning',
       icon: Activity,
     },
     {
-      label: "Blocks Scanned",
+      label: 'Blocks Scanned',
       value: `${numberFormatter.format(scheduler.stats.scanned_blocks)} / ${numberFormatter.format(
-        scheduler.stats.total_blocks,
+        scheduler.stats.total_blocks
       )}`,
       detail: `${numberFormatter.format(scheduler.stats.unscanned_blocks)} still eligible`,
       icon: Radar,
     },
     {
-      label: "Discovered Hosts",
-      value: numberFormatter.format(discoveredHosts),
-      detail: `${numberFormatter.format(scheduler.stats.total_yield)} ACO yield in scheduler memory`,
+      label: 'Hosts Found',
+      value: numberFormatter.format(scheduler.stats.total_yield),
+      detail: `${numberFormatter.format(history.length)} recent persisted ingests`,
       icon: Database,
     },
     {
-      label: "Geocoded Hosts",
+      label: 'Geocoded Hosts',
       value: numberFormatter.format(geography.known_hosts),
       detail: `${numberFormatter.format(geography.unknown_hosts)} still missing geography`,
       icon: Globe,
     },
-  ];
+  ]
 
   return (
-    <div className="flex h-[calc(100vh-64px)] gap-0 bg-[#0a0a0a]">
-      {/* Surface 1: Workflow Rail (left) */}
-      <aside className="hidden xl:flex w-80 flex-shrink-0 flex-col border-r border-gray-800">
-        <WorkflowRail
-          workflows={workflowsData || []}
-          selectedId={selectedWorkflowId}
-          onSelect={setSelectedWorkflowId}
-        />
-      </aside>
+    <div className="space-y-6 px-4 py-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white">ACO Scanner</h2>
+          <p className="mt-2 max-w-3xl text-sm text-gray-500 dark:text-gray-400">
+            Live control room for the bounded block scanner, including current jobs, recent block
+            results, and where geocoded hosts are showing up globally.
+          </p>
+        </div>
 
-      {/* Center: Scanner Control Room */}
-      <main className="flex-1 min-w-0 overflow-y-auto">
-        <div className="p-6 space-y-6">
-          {/* Header + status strip */}
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-            <div>
-              <h2 className="text-2xl font-bold text-white">
-                Scanner Control Room
-              </h2>
-              <p className="mt-2 max-w-4xl text-sm text-gray-400">
-                Workflow-first control room for continuous ACO scanning, one-off
-                discovery runs, and the downstream jobs they create.
-              </p>
+        <div className="flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300">
+          <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+          Polling every 5s
+        </div>
+      </div>
+
+      {message && (
+        <div
+          className={`flex items-center gap-3 rounded-xl p-4 text-sm ${
+            message.type === 'success'
+              ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-200'
+              : 'bg-rose-50 text-rose-800 dark:bg-rose-900/20 dark:text-rose-200'
+          }`}
+        >
+          {message.type === 'success' ? (
+            <CheckCircle className="h-5 w-5" />
+          ) : (
+            <AlertCircle className="h-5 w-5" />
+          )}
+          <span>{message.text}</span>
+        </div>
+      )}
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {overviewCards.map((card) => {
+          const Icon = card.icon
+
+          return (
+            <div
+              key={card.label}
+              className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm dark:border-gray-700 dark:bg-gray-800"
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">{card.label}</p>
+                  <p className="mt-2 text-2xl font-semibold capitalize text-gray-900 dark:text-white">
+                    {card.value}
+                  </p>
+                </div>
+                <div className="rounded-lg bg-blue-50 p-2 text-blue-600 dark:bg-blue-900/20 dark:text-blue-300">
+                  <Icon className="h-5 w-5" />
+                </div>
+              </div>
+              <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">{card.detail}</p>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+        <div className="space-y-6">
+          <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                  Scheduler Control
+                </h3>
+                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                  Start or stop the background scanner without dropping the dashboard.
+                </p>
+              </div>
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-medium uppercase tracking-wide ${statusClasses[status]}`}
+              >
+                {status.replace('_', ' ')}
+              </span>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="flex items-center gap-2 rounded-full border border-gray-800 bg-[#111] px-3 py-2 text-sm text-gray-300">
-                <RefreshCw
-                  className={`h-4 w-4 ${isFetching || jobsFetching || probeStatsFetching ? "animate-spin" : ""}`}
-                />
-                Polling admin state
+            <div className="mt-5 grid gap-4 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => handleSchedulerAction('start')}
+                disabled={activeAction !== null || status === 'running' || status === 'stopping'}
+                className="flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-400"
+              >
+                {activeAction === 'start' ? (
+                  <Loader className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="h-4 w-4" />
+                )}
+                Start Scheduler
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSchedulerAction('stop')}
+                disabled={activeAction !== null || status === 'stopped' || status === 'not_running'}
+                className="flex items-center justify-center gap-2 rounded-lg bg-slate-800 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-slate-900 disabled:cursor-not-allowed disabled:bg-slate-400"
+              >
+                {activeAction === 'stop' ? (
+                  <Loader className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Square className="h-4 w-4" />
+                )}
+                Stop Scheduler
+              </button>
+            </div>
+
+            <dl className="mt-5 space-y-3 text-sm text-gray-600 dark:text-gray-300">
+              <div className="flex items-center justify-between gap-3">
+                <dt>Port</dt>
+                <dd className="font-mono">{scheduler.config?.port || '11434'}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt>Rate</dt>
+                <dd className="font-mono">
+                  {numberFormatter.format(scheduler.config?.rate || 100000)} pps
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt>Block Size</dt>
+                <dd className="font-mono">/{scheduler.prefix_len ?? 'n/a'}</dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt>Target Duration</dt>
+                <dd className="font-mono">
+                  {formatSeconds(scheduler.estimated_block_duration_s)} / {formatSeconds(
+                    scheduler.config?.max_block_duration_s || null
+                  )}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt>Cooldown Between Revisits</dt>
+                <dd className="font-mono">
+                  {formatSeconds(scheduler.config?.min_scan_interval_s || null)}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <dt>Scheduler Uptime</dt>
+                <dd className="font-mono">{formatSeconds(scheduler.uptime_seconds)}</dd>
+              </div>
+            </dl>
+
+            {scheduler.last_error && (
+              <div className="mt-5 rounded-lg bg-rose-50 p-3 text-sm text-rose-800 dark:bg-rose-900/20 dark:text-rose-200">
+                <p className="font-medium">Last scheduler error</p>
+                <p className="mt-1 break-words">{scheduler.last_error}</p>
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+            <div className="flex items-start gap-3">
+              <Clock3 className="mt-1 h-5 w-5 text-blue-600 dark:text-blue-300" />
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Current Job</h3>
+                <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                  The block currently being scanned, if the scheduler is active.
+                </p>
+              </div>
+            </div>
+
+            {currentJob ? (
+              <div className="mt-5 space-y-4">
+                <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 dark:border-blue-800 dark:bg-blue-900/20">
+                  <p className="text-xs uppercase tracking-wide text-blue-700 dark:text-blue-200">
+                    Active Block
+                  </p>
+                  <p className="mt-2 text-2xl font-semibold text-blue-900 dark:text-blue-100">
+                    {currentJob.cidr}
+                  </p>
+                  <p className="mt-2 text-sm text-blue-700 dark:text-blue-200">
+                    Started {formatAge(currentJob.started_at)} and capped at about{' '}
+                    {formatSeconds(currentJob.estimated_duration_s)}.
+                  </p>
+                </div>
+
+                <dl className="space-y-3 text-sm text-gray-600 dark:text-gray-300">
+                  <div className="flex items-center justify-between gap-3">
+                    <dt>Scan UUID</dt>
+                    <dd className="font-mono">{currentJob.scan_uuid}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt>Started At</dt>
+                    <dd className="font-mono">{formatTimestamp(currentJob.started_at)}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt>Output File</dt>
+                    <dd className="max-w-[16rem] truncate font-mono">{currentJob.output_file}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt>Log File</dt>
+                    <dd className="max-w-[16rem] truncate font-mono">{currentJob.log_file}</dd>
+                  </div>
+                </dl>
+              </div>
+            ) : (
+              <div className="mt-5 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-900/40 dark:text-gray-400">
+                No block is currently being scanned.
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <Terminal className="h-5 w-5 text-gray-600 dark:text-gray-300" />
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Live Scanner Logs</h3>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    Real-time masscan output from the current block.
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
-                onClick={handleLock}
-                className="rounded-full border border-gray-800 bg-[#111] px-3 py-2 text-sm text-gray-300 transition-colors hover:bg-gray-800"
+                onClick={() => setShowLogs(!showLogs)}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  showLogs
+                    ? 'bg-slate-200 text-slate-800 hover:bg-slate-300 dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600'
+                    : 'bg-blue-100 text-blue-800 hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-200 dark:hover:bg-blue-900/60'
+                }`}
               >
-                Lock Admin
+                {showLogs ? 'Hide Logs' : 'Show Logs'}
               </button>
             </div>
-          </div>
 
-          {message && (
-            <div
-              className={`flex items-center gap-3 rounded-lg border p-4 text-sm ${
-                message.type === "success"
-                  ? "border-emerald-800 bg-emerald-900/20 text-emerald-200"
-                  : "border-rose-800 bg-rose-900/20 text-rose-200"
-              }`}
-            >
-              {message.type === "success" ? (
-                <CheckCircle className="h-5 w-5" />
-              ) : (
-                <AlertCircle className="h-5 w-5" />
-              )}
-              <span>{message.text}</span>
-            </div>
-          )}
-
-          {/* Overview KPIs */}
-          <OverviewGrid cards={overviewCards} />
-
-          {/* Control Console + Groups */}
-          <ScannerWorkbench
-            schedulerStatus={status}
-            onRefresh={async () => {
-              await Promise.all([refetch(), refetchJobs(), refetchProbeStats()]);
-            }}
-          />
-
-          <HostGroupsPanel
-            onChanged={async () => {
-              await Promise.all([refetch(), refetchJobs(), refetchProbeStats()]);
-            }}
-          />
-
-          {/* Constitutional Exclusions */}
-          <ExclusionsPanel />
-
-          {/* World Map */}
-          <div className="rounded-lg border border-gray-800 bg-[#111] p-6">
-            <ScannerWorldMap
-              countries={geography.countries}
-              knownHosts={geography.known_hosts}
-              unknownHosts={geography.unknown_hosts}
-              points={geography.points}
-              blocks={geography.blocks}
-              countryDetails={geography.country_details}
-              blockPrefixLen={geography.block_prefix_len}
-            />
-          </div>
-
-          {/* Current job / logs / probe stats / jobs */}
-          <div className="grid gap-6 xl:grid-cols-[minmax(0,0.78fr)_minmax(0,1.22fr)]">
-            <div className="space-y-6">
-              <CurrentWorkflowCard currentJob={currentJob} />
-              <LiveLogsCard
-                logData={logData}
-                logsFetching={logsFetching}
-                showLogs={showLogs}
-                onToggleLogs={() => setShowLogs((prev) => !prev)}
-                onRefreshLogs={() => void refetchLogs()}
-              />
-            </div>
-
-            <div className="space-y-6">
-              <ProbeSnapshotCard
-                probeStats={probeStats}
-                onRefresh={() => void refetchProbeStats()}
-              />
-              <JobsPanel
-                workers={jobsData?.workers}
-                jobs={celeryJobs}
-                onRefresh={() => void refetchJobs()}
-              />
-            </div>
-          </div>
-
-          {/* Workflow history */}
-          <WorkflowHistoryPanel
-            recentResults={recentResults}
-            topBlocks={topBlocks}
-            history={history}
-          />
-
-          {/* Mobile / small-screen fallback for workflow list + detail */}
-          <div className="space-y-6 xl:hidden">
-            <div className="rounded-lg border border-gray-800 bg-[#111]">
-              <div className="px-4 py-3 border-b border-gray-800">
-                <div className="text-[10px] font-mono uppercase tracking-[0.25em] text-gray-500">
-                  Workflows
-                </div>
-              </div>
-              <div className="p-4">
-                {workflowsData && workflowsData.length > 0 ? (
-                  <div className="space-y-2">
-                    {workflowsData.slice(0, 5).map((wf) => (
+            {showLogs && (
+              <div className="mt-4">
+                {logsFetching && !logData ? (
+                  <div className="flex items-center justify-center py-8">
+                    <Loader className="h-6 w-6 animate-spin text-blue-600" />
+                  </div>
+                ) : logData?.status === 'not_running' ? (
+                  <div className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600 dark:bg-slate-900/40 dark:text-slate-400">
+                    Scheduler is not running. Start it to see live logs.
+                  </div>
+                ) : logData?.status === 'idle' ? (
+                  <div className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600 dark:bg-slate-900/40 dark:text-slate-400">
+                    {logData.message || 'No scan currently running.'}
+                    {logData.last_error && (
+                      <p className="mt-2 text-rose-600 dark:text-rose-400">Last error: {logData.last_error}</p>
+                    )}
+                  </div>
+                ) : logData?.logs ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-xs text-gray-500 dark:text-gray-400">
+                      <span>
+                        <span className="font-mono">{logData.scan?.cidr}</span>
+                        {' — '}
+                        <span className="font-mono">{logData.scan?.scan_uuid}</span>
+                      </span>
                       <button
-                        key={wf.workflow_id}
                         type="button"
-                        onClick={() => setSelectedWorkflowId(wf.workflow_id)}
-                        className={`w-full rounded-lg border p-3 text-left text-xs font-mono transition-colors ${
-                          selectedWorkflowId === wf.workflow_id
-                            ? "border-green-500 bg-green-900/15"
-                            : "border-gray-800 hover:bg-gray-900"
-                        }`}
+                        onClick={() => refetchLogs()}
+                        className="flex items-center gap-1 hover:text-blue-600 dark:hover:text-blue-400"
                       >
-                        <div className="flex justify-between gap-2">
-                          <span className="text-gray-300 truncate">{wf.strategy} // {wf.target}</span>
-                          <span className={`px-2 py-0.5 rounded text-[10px] ${
-                            wf.status === 'completed' ? 'bg-emerald-500/20 text-emerald-400' :
-                            wf.status === 'running' ? 'bg-amber-500/20 text-amber-400' :
-                            wf.status === 'failed' ? 'bg-rose-500/20 text-rose-400' :
-                            'bg-gray-700 text-gray-400'
-                          }`}>
-                            {wf.status}
-                          </span>
-                        </div>
+                        <RefreshCw className={`h-3.5 w-3.5 ${logsFetching ? 'animate-spin' : ''}`} />
+                        Refresh
                       </button>
-                    ))}
+                    </div>
+                    <div className="max-h-[32rem] overflow-auto rounded-lg bg-slate-900 p-4 font-mono text-xs leading-relaxed text-slate-100">
+                      <pre className="whitespace-pre-wrap break-words">{logData.logs}</pre>
+                    </div>
                   </div>
                 ) : (
-                  <p className="text-xs text-gray-500 font-mono">No workflows yet</p>
+                  <div className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600 dark:bg-slate-900/40 dark:text-slate-400">
+                    Waiting for log output...
+                  </div>
                 )}
-              </div>
-            </div>
-
-            {selectedWorkflow && (
-              <div className="rounded-lg border border-gray-800 bg-[#111] p-4">
-                <div className="text-sm font-semibold text-white mb-2">
-                  Workflow {selectedWorkflow.workflow_id.slice(0, 8)}
-                </div>
-                <div className="text-xs text-gray-400 font-mono">
-                  {selectedWorkflow.strategy} // {selectedWorkflow.target}
-                </div>
-                <div className="mt-2 text-xs text-gray-500">
-                  Policy: {selectedWorkflow.policy_snapshot_hash?.slice(0, 16)}...
-                </div>
               </div>
             )}
           </div>
         </div>
-      </main>
 
-      {/* Surface 4: Evidence Ledger (right) */}
-      <aside className="hidden 2xl:flex w-[26rem] flex-shrink-0 border-l border-gray-800">
-        {selectedWorkflow ? (
-          <EvidenceLedger workflow={selectedWorkflow} />
-        ) : (
-          <div className="h-full flex flex-col bg-[#050505]">
-            <div className="px-4 py-3 border-b border-gray-800">
-              <div className="text-[10px] font-mono uppercase tracking-[0.25em] text-gray-500">
-                Evidence Ledger
-              </div>
-            </div>
-            <div className="flex-1 flex items-center justify-center px-6">
-              <p className="text-xs font-mono text-gray-500 text-center">
-                Select a workflow from the rail to inspect its receipts, metrics, and evidence.
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+          <ScannerWorldMap
+            countries={geography.countries}
+            knownHosts={geography.known_hosts}
+            unknownHosts={geography.unknown_hosts}
+          />
+        </div>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-3">
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800 xl:col-span-2">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Recent Block Jobs</h3>
+              <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                Live block-level results from the in-process scheduler.
               </p>
             </div>
+            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-200">
+              {numberFormatter.format(recentResults.length)} results
+            </span>
           </div>
-        )}
-      </aside>
+
+          <div className="mt-5 space-y-3">
+            {recentResults.length > 0 ? (
+              recentResults.map((result) => (
+                <div
+                  key={`${result.scan_uuid}-${result.completed_at}`}
+                  className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900/40"
+                >
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-semibold text-gray-900 dark:text-white">{result.cidr}</p>
+                        <span
+                          className={`rounded-full px-2.5 py-1 text-xs font-medium ${resultClasses(result.success)}`}
+                        >
+                          {result.success ? 'completed' : 'failed'}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                        Finished {formatAge(result.completed_at)} after {formatDurationMs(result.duration_ms)}.
+                      </p>
+                    </div>
+
+                    <div className="text-right text-sm">
+                      <p className="font-semibold text-gray-900 dark:text-white">
+                        {numberFormatter.format(result.hosts_found)} hosts
+                      </p>
+                      <p className="text-gray-500 dark:text-gray-400">{result.scan_uuid}</p>
+                    </div>
+                  </div>
+
+                  {result.error && (
+                    <p className="mt-3 text-sm text-rose-700 dark:text-rose-300">{result.error}</p>
+                  )}
+                </div>
+              ))
+            ) : (
+              <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-900/40 dark:text-gray-400">
+                No live block results yet.
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Top Candidate Blocks</h3>
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+            Highest-pheromone blocks the ACO engine is currently favoring.
+          </p>
+
+          <div className="mt-5 space-y-3">
+            {topBlocks.length > 0 ? (
+              topBlocks.slice(0, 8).map((block) => (
+                <div
+                  key={block.cidr}
+                  className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900/40"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-mono text-sm font-medium text-gray-900 dark:text-white">
+                      {block.cidr}
+                    </p>
+                    <p className="text-sm font-semibold text-blue-600 dark:text-blue-300">
+                      {block.pheromone.toFixed(3)}
+                    </p>
+                  </div>
+                  <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                    {numberFormatter.format(block.cumulative_yield)} hosts over{' '}
+                    {numberFormatter.format(block.scan_count)} scans.
+                  </p>
+                  <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
+                    Last scan: {formatAge(block.last_scan)}
+                  </p>
+                </div>
+              ))
+            ) : (
+              <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-900/40 dark:text-gray-400">
+                Start the scheduler to build block rankings.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Persisted ACO Ingest History</h3>
+        <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+          Blocks that were ingested into the database after masscan finished.
+        </p>
+
+        <div className="mt-5 space-y-3">
+          {history.length > 0 ? (
+            history.slice(0, 10).map((entry) => (
+              <div
+                key={entry.scan_id}
+                className="rounded-xl border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900/40"
+              >
+                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-semibold text-gray-900 dark:text-white">
+                        {entry.cidr || `scan #${entry.scan_id}`}
+                      </p>
+                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-200">
+                        {entry.status}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                      Started {formatAge(entry.started_at)} and recorded{' '}
+                      {numberFormatter.format(entry.hosts_found)} hosts.
+                    </p>
+                  </div>
+
+                  <div className="text-right text-sm text-gray-500 dark:text-gray-400">
+                    <p>{formatTimestamp(entry.started_at)}</p>
+                    <p>{entry.completed_at ? formatTimestamp(entry.completed_at) : 'Still processing'}</p>
+                  </div>
+                </div>
+
+                {entry.error_message && (
+                  <p className="mt-3 text-sm text-rose-700 dark:text-rose-300">
+                    {entry.error_message}
+                  </p>
+                )}
+              </div>
+            ))
+          ) : (
+            <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-5 text-sm text-gray-500 dark:border-gray-700 dark:bg-gray-900/40 dark:text-gray-400">
+              No ACO block ingests have been recorded yet.
+            </div>
+          )}
+        </div>
+      </div>
     </div>
-  );
+  )
 }

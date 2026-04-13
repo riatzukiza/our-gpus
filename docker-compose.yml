@@ -3,11 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    network_mode: host
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18000", "--reload"]
+    ports:
+      - "18000:8000"
     volumes:
       - ./app:/app/app
       - ./data:/app/data
@@ -98,8 +95,6 @@ services:
       dockerfile: Dockerfile
     ports:
       - "15173:5173"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       - VITE_API_URL=http://host.docker.internal:18000
     depends_on:
