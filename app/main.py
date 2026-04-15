@@ -3,6 +3,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import secrets
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -57,8 +58,14 @@ from app.shodan_queries import build_shodan_query_plan
 from worker.celery_app import celery_app
 from worker.tasks import register_task_job
 
+from app.lead_routes import router as lead_router
+
 app = FastAPI(title="our gpu API", version="1.0.0")
 app.include_router(lead_router)
+
+# Scan strategy constants (used by some request schemas below).
+# Keep as strings so older clients can specify scan mode without importing internals.
+TOR_CONNECT_STRATEGY = "tor"
 
 # Metrics
 ingest_counter = Counter("ingest_total", "Total ingests started")
@@ -613,6 +620,70 @@ async def get_admin_jobs(
         "workers": _inspect_workers(),
         "summary": summary,
         "jobs": [_serialize_task_job(job) for job in jobs],
+    }
+
+
+class OpenPlannerSyncRequest(BaseModel):
+    status: str | None = None
+    has_gpu: bool | None = None
+    limit: int | None = None
+    include_graph_nodes: bool = True
+
+
+class OpenPlannerSyncResponse(BaseModel):
+    task_id: str
+    status: str
+    message: str
+
+
+@app.post("/api/admin/openplanner/sync", response_model=OpenPlannerSyncResponse)
+async def trigger_openplanner_sync(
+    request: OpenPlannerSyncRequest,
+    _: None = Depends(require_admin_api_key),
+):
+    """Trigger a sync of discovered GPU hosts to OpenPlanner event lake.
+
+    This queues a Celery task that will sync hosts to OpenPlanner,
+    creating events for semantic search and graph-based discovery.
+    """
+    from worker.tasks import sync_to_openplanner
+
+    task = sync_to_openplanner.delay(
+        status=request.status,
+        has_gpu=request.has_gpu,
+        limit=request.limit,
+        include_graph_nodes=request.include_graph_nodes,
+    )
+
+    register_task_job(
+        task.id,
+        kind="sync_to_openplanner",
+        label=f"OpenPlanner sync (status={request.status or 'all'}, gpu={request.has_gpu})",
+        total_items=request.limit or 0,
+        payload={
+            "status_filter": request.status,
+            "has_gpu": request.has_gpu,
+            "limit": request.limit,
+            "include_graph_nodes": request.include_graph_nodes,
+        },
+    )
+
+    return OpenPlannerSyncResponse(
+        task_id=task.id,
+        status="queued",
+        message=f"OpenPlanner sync task queued with {request.limit or 'all'} hosts",
+    )
+
+
+@app.get("/api/admin/openplanner/status")
+async def get_openplanner_status(_: None = Depends(require_admin_api_key)):
+    """Get OpenPlanner integration status."""
+    return {
+        "enabled": settings.openplanner_sync_enabled,
+        "url": settings.openplanner_url,
+        "batch_size": settings.openplanner_batch_size,
+        "timeout_secs": settings.openplanner_timeout_secs,
+        "api_key_configured": bool(settings.openplanner_api_key),
     }
 
 
