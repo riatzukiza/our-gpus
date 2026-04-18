@@ -773,6 +773,95 @@ def queue_ungeocoded_hosts(
     }
 
 
+@celery_app.task(bind=True, name="worker.tasks.sync_to_openplanner")
+def sync_to_openplanner(
+    self,
+    status: str | None = None,
+    has_gpu: bool | None = None,
+    limit: int | None = None,
+    include_graph_nodes: bool = True,
+):  # noqa: ARG001
+    """Sync discovered GPU hosts to OpenPlanner event lake.
+
+    Args:
+        status: Filter hosts by status (e.g., "online", "discovered"). None = all.
+        has_gpu: Filter hosts with GPU detected. None = all.
+        limit: Maximum number of hosts to sync. None = all.
+        include_graph_nodes: Also emit graph.node and graph.edge events.
+
+    Returns:
+        Dict with sync statistics.
+    """
+    from app.openplanner_sync import sync_hosts_to_openplanner_sync
+
+    task_id = self.request.id
+    label = f"Sync to OpenPlanner (status={status or 'all'}, gpu={has_gpu})"
+
+    if task_id:
+        _mark_task_started(task_id, kind="sync_to_openplanner", label=label)
+
+    with Session(engine) as session:
+        # Build query for hosts to sync
+        query = select(Host).order_by(Host.last_seen.desc())
+
+        if status is not None:
+            query = query.where(Host.status == status)
+
+        if has_gpu is True:
+            query = query.where(Host.gpu != None)  # noqa: E711
+        elif has_gpu is False:
+            query = query.where(Host.gpu == None)  # noqa: E711
+
+        if limit is not None:
+            query = query.limit(limit)
+
+        hosts = list(session.exec(query).all())
+
+        # Fetch models for each host
+        host_models: dict[int, list[dict]] = {}
+        for host in hosts:
+            if host.id is None:
+                continue
+            host_model_records = session.exec(
+                select(HostModel, Model)
+                .join(Model, HostModel.model_id == Model.id)
+                .where(HostModel.host_id == host.id)
+            ).all()
+
+            host_models[host.id] = [
+                {
+                    "name": model.name,
+                    "family": model.family,
+                    "parameters": model.parameters,
+                    "loaded": hm.loaded,
+                    "vram_usage_mb": hm.vram_usage_mb,
+                }
+                for hm, model in host_model_records
+            ]
+
+    # Sync to OpenPlanner
+    result = sync_hosts_to_openplanner_sync(
+        hosts, host_models=host_models, include_graph_nodes=include_graph_nodes
+    )
+
+    if task_id:
+        _mark_task_finished(
+            task_id,
+            kind="sync_to_openplanner",
+            label=label,
+            status=result.get("status", "unknown"),
+            total_items=result.get("hosts_count", 0),
+            processed_items=result.get("events_sent", 0),
+            success_items=result.get("events_sent", 0),
+            failed_items=result.get("events_total", 0) - result.get("events_sent", 0),
+            payload=result,
+            message=f"Synced {result.get('events_sent', 0)} events for {result.get('hosts_count', 0)} hosts",
+            error=result.get("errors", [None])[0] if result.get("errors") else None,
+        )
+
+    return result
+
+
 @celery_app.task(bind=True, name="worker.tasks.enrich_leads")
 def enrich_leads(self, limit: int | None = None):  # noqa: ARG001
     """Enrich probed Ollama hosts with RDAP, ISP, and cloud provider data."""

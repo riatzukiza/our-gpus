@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     shodan_max_matches: int = 1000
     shodan_max_queries: int = 24
     shodan_query_max_length: int = 900
+    # OpenPlanner integration
+    openplanner_url: str = "http://127.0.0.1:8788/api/openplanner"
+    openplanner_api_key: str = ""
+    openplanner_sync_enabled: bool = True
+    openplanner_batch_size: int = 100
+    openplanner_timeout_secs: int = 30
 
     class Config:
         env_file = ".env"
