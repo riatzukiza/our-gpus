@@ -1,3 +1,17 @@
+---
+uuid: "orgs-shuv-our-gpus-kanban-orgs-shuv-our-gpus-specs-entity-graph-contract-md"
+title: "Entity Graph Contract"
+status: incoming
+priority: P3
+labels: ["specs", "migrated-spec"]
+created_at: "2026-05-29T04:01:22.511Z"
+source: "orgs/shuv/our-gpus/specs/entity-graph-contract.md"
+category: "specs"
+---
+
+> Source: `orgs/shuv/our-gpus/specs/entity-graph-contract.md`
+> Migrated-to-kanban: `orgs/shuv/our-gpus/kanban/entity-graph-contract.md`
+
 # Entity Graph Contract
 
 ## Status

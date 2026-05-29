@@ -1,3 +1,17 @@
+---
+uuid: "orgs-shuv-our-gpus-kanban-orgs-shuv-our-gpus-specs-admin-page-layout-md"
+title: "Admin Page Layout"
+status: incoming
+priority: P3
+labels: ["specs", "migrated-spec"]
+created_at: "2026-05-29T04:01:22.512Z"
+source: "orgs/shuv/our-gpus/specs/admin-page-layout.md"
+category: "specs"
+---
+
+> Source: `orgs/shuv/our-gpus/specs/admin-page-layout.md`
+> Migrated-to-kanban: `orgs/shuv/our-gpus/kanban/admin-page-layout.md`
+
 # Admin Page Layout
 
 ## Status

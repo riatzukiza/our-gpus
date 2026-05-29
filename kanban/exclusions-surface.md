@@ -1,3 +1,17 @@
+---
+uuid: "orgs-shuv-our-gpus-kanban-orgs-shuv-our-gpus-specs-exclusions-surface-md"
+title: "Exclusions Surface"
+status: incoming
+priority: P3
+labels: ["specs", "migrated-spec"]
+created_at: "2026-05-29T04:01:22.513Z"
+source: "orgs/shuv/our-gpus/specs/exclusions-surface.md"
+category: "specs"
+---
+
+> Source: `orgs/shuv/our-gpus/specs/exclusions-surface.md`
+> Migrated-to-kanban: `orgs/shuv/our-gpus/kanban/exclusions-surface.md`
+
 # Exclusions Surface
 
 ## Status

@@ -1,3 +1,17 @@
+---
+uuid: "orgs-shuv-our-gpus-kanban-orgs-shuv-our-gpus-specs-safety-model-md"
+title: "Safety Model"
+status: incoming
+priority: P3
+labels: ["specs", "migrated-spec"]
+created_at: "2026-05-29T04:01:22.513Z"
+source: "orgs/shuv/our-gpus/specs/safety-model.md"
+category: "specs"
+---
+
+> Source: `orgs/shuv/our-gpus/specs/safety-model.md`
+> Migrated-to-kanban: `orgs/shuv/our-gpus/kanban/safety-model.md`
+
 # Safety Model
 
 ## Status

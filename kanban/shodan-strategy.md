@@ -1,3 +1,17 @@
+---
+uuid: "orgs-shuv-our-gpus-kanban-orgs-shuv-our-gpus-specs-shodan-strategy-md"
+title: "Shodan Strategy"
+status: incoming
+priority: P3
+labels: ["specs", "migrated-spec"]
+created_at: "2026-05-29T04:01:22.517Z"
+source: "orgs/shuv/our-gpus/specs/shodan-strategy.md"
+category: "specs"
+---
+
+> Source: `orgs/shuv/our-gpus/specs/shodan-strategy.md`
+> Migrated-to-kanban: `orgs/shuv/our-gpus/kanban/shodan-strategy.md`
+
 # Shodan Strategy
 
 ## Status

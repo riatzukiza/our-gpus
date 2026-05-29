@@ -1,3 +1,17 @@
+---
+uuid: "orgs-shuv-our-gpus-kanban-orgs-shuv-our-gpus-specs-discovery-strategies-md"
+title: "Discovery Strategies"
+status: incoming
+priority: P3
+labels: ["specs", "migrated-spec"]
+created_at: "2026-05-29T04:01:22.517Z"
+source: "orgs/shuv/our-gpus/specs/discovery-strategies.md"
+category: "specs"
+---
+
+> Source: `orgs/shuv/our-gpus/specs/discovery-strategies.md`
+> Migrated-to-kanban: `orgs/shuv/our-gpus/kanban/discovery-strategies.md`
+
 # Discovery Strategies
 
 ## Status

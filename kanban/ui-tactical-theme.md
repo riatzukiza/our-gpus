@@ -1,3 +1,17 @@
+---
+uuid: "orgs-shuv-our-gpus-kanban-orgs-shuv-our-gpus-specs-ui-tactical-theme-md"
+title: "UI Tactical Theme"
+status: incoming
+priority: P3
+labels: ["specs", "migrated-spec"]
+created_at: "2026-05-29T04:01:22.518Z"
+source: "orgs/shuv/our-gpus/specs/ui-tactical-theme.md"
+category: "specs"
+---
+
+> Source: `orgs/shuv/our-gpus/specs/ui-tactical-theme.md`
+> Migrated-to-kanban: `orgs/shuv/our-gpus/kanban/ui-tactical-theme.md`
+
 # UI Tactical Theme
 
 ## Status

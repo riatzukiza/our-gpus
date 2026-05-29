@@ -1,3 +1,17 @@
+---
+uuid: "orgs-shuv-our-gpus-kanban-orgs-shuv-our-gpus-specs-leads-management-md"
+title: "Leads Management"
+status: incoming
+priority: P3
+labels: ["specs", "migrated-spec"]
+created_at: "2026-05-29T04:01:22.515Z"
+source: "orgs/shuv/our-gpus/specs/leads-management.md"
+category: "specs"
+---
+
+> Source: `orgs/shuv/our-gpus/specs/leads-management.md`
+> Migrated-to-kanban: `orgs/shuv/our-gpus/kanban/leads-management.md`
+
 # Leads Management
 
 ## Status
